@@ -93,3 +93,19 @@ jobs:
           # Emits latest.json, which the updater endpoint points at.
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+      # tauri-action also uploads a standalone .sig for each installer. The
+      # updater never fetches it — the signature it checks is embedded in
+      # latest.json — so on the release page it's just an unexplained 0 KB file
+      # next to the thing people actually want to download.
+      - name: Drop the redundant signature files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${{ github.ref_name }}" --json assets \
+            --jq '.assets[].name | select(endswith(".sig"))' |
+          while read -r asset; do
+            echo "removing $asset"
+            gh release delete-asset "${{ github.ref_name }}" "$asset" --yes
+          done

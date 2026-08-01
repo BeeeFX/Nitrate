@@ -78,6 +78,11 @@ queue is clear so nothing in flight gets thrown away.
 Every update is signed, and the app refuses any package that doesn't match the
 public key it was built with.
 
+<sub>Note that this is not Windows code signing — it won't stop the SmartScreen
+prompt on first install. If you want to verify an installer by hand, its
+signature is published in the release's `latest.json`, and the matching public
+key is in `src-tauri/tauri.conf.json`.</sub>
+
 ## How it hits an exact size
 
 File size is just bitrate multiplied by duration, so a target size maps straight
