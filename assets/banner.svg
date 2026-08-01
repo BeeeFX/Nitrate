@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 440" width="1280" height="440">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="18%" r="62%">
+      <stop offset="0%" stop-color="#5865F2" stop-opacity="0.42"/>
+      <stop offset="100%" stop-color="#5865F2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="440" fill="#0B0C12"/>
+  <rect width="1280" height="440" fill="url(#glow)"/>
+
+  <!-- App mark: the icon's own geometry, scaled as a unit so the proportions
+       stay exactly as they are on the desktop. -->
+  <g transform="translate(558, 42) scale(0.16)">
+    <rect x="64" y="64" width="896" height="896" rx="232" fill="#5865F2"/>
+    <g stroke="#FFFFFF" stroke-width="76" stroke-linecap="round"
+       stroke-linejoin="round" fill="none">
+      <polyline points="348,300 512,414 676,300"/>
+      <polyline points="348,724 512,610 676,724"/>
+    </g>
+    <rect x="336" y="478" width="352" height="68" rx="34" fill="#FFFFFF"/>
+  </g>
+
+  <text x="640" y="272" text-anchor="middle" fill="#EDEEF4"
+        font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
+        font-size="76" font-weight="700" letter-spacing="-1">Nitrate</text>
+
+  <text x="640" y="322" text-anchor="middle" fill="#9BA0B4"
+        font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
+        font-size="26" font-weight="400">Drag, drop, done. Any video, under Discord's limit.</text>
+
+  <!-- Tier pills -->
+  <g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" font-weight="600">
+    <g transform="translate(430, 358)">
+      <rect width="122" height="46" rx="14" fill="#5865F2"/>
+      <text x="61" y="30" text-anchor="middle" fill="#FFFFFF">10 MB</text>
+    </g>
+    <g transform="translate(566, 358)">
+      <rect width="122" height="46" rx="14" fill="#FFFFFF" fill-opacity="0.06"/>
+      <text x="61" y="30" text-anchor="middle" fill="#9BA0B4">50 MB</text>
+    </g>
+    <g transform="translate(702, 358)">
+      <rect width="122" height="46" rx="14" fill="#FFFFFF" fill-opacity="0.06"/>
+      <text x="61" y="30" text-anchor="middle" fill="#9BA0B4">100 MB</text>
+    </g>
+    <g transform="translate(838, 358)">
+      <rect width="122" height="46" rx="14" fill="#FFFFFF" fill-opacity="0.06"/>
+      <text x="61" y="30" text-anchor="middle" fill="#9BA0B4">500 MB</text>
+    </g>
+  </g>
+</svg>

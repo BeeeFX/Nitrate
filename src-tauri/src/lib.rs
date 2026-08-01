@@ -5,6 +5,7 @@ pub mod encode;
 pub mod ffmpeg;
 mod tray;
 
+use base64::Engine as _;
 use encode::Settings;
 use ffmpeg::{Binaries, MediaInfo};
 use serde::Serialize;
@@ -31,6 +32,11 @@ pub struct AppState {
     bins: Binaries,
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     queue: Sender<QueuedJob>,
+    /// Files named on the command line, held until the webview is ready to
+    /// receive them. Launching via "Open with" beats the frontend to startup.
+    pending_files: Mutex<Vec<String>>,
+    /// Set when something asked for the window before the UI had painted.
+    show_on_ready: Arc<AtomicBool>,
     /// Set while a native dialog is open or the window is pinned, so the
     /// hide-on-blur behaviour doesn't yank the popup away mid-interaction.
     suppress_hide: Arc<AtomicBool>,
@@ -103,11 +109,20 @@ async fn inspect_file(
 
     // A frame from 25% in is usually more representative than frame zero,
     // which is often black or a fade-in.
+    //
+    // The frame comes back as a data URL rather than a file path: these are a
+    // few KB each, and inlining them avoids the asset protocol entirely — no
+    // scope config, no CSP origin to keep in sync, nothing to leave on disk.
     let thumbnail = app.path().app_cache_dir().ok().and_then(|cache| {
         std::fs::create_dir_all(&cache).ok()?;
         let out = cache.join(format!("thumb-{}.jpg", fast_hash(&path)));
         ffmpeg::thumbnail(&state.bins, &input, &out, info.duration * 0.25).ok()?;
-        Some(out.to_string_lossy().into_owned())
+        let bytes = std::fs::read(&out).ok()?;
+        let _ = std::fs::remove_file(&out);
+        Some(format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
     });
 
     Ok(FileInfo {
@@ -210,6 +225,35 @@ fn hide_window(app: AppHandle) {
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// Hands over any files named on the command line, clearing them so a later
+/// call doesn't re-add the same videos.
+#[tauri::command]
+fn take_pending_files(state: State<'_, AppState>) -> Vec<String> {
+    std::mem::take(&mut *state.pending_files.lock().unwrap())
+}
+
+/// Called once the UI has painted.
+///
+/// Showing the window from `setup` races the webview: the window can be
+/// revealed before there's anything in it, or the show can be swallowed
+/// entirely. Waiting for the frontend to say it's ready avoids both, and means
+/// the first frame the user sees is the finished interface.
+#[tauri::command]
+fn frontend_ready(app: AppHandle, state: State<'_, AppState>) {
+    let opened_with_files = !state.pending_files.lock().unwrap().is_empty();
+    if cfg!(debug_assertions) || opened_with_files || state.show_on_ready.load(Ordering::Relaxed) {
+        tray::show_popup(&app, None);
+    }
+}
+
+/// Picks the real file paths out of argv, ignoring the executable and any flags.
+fn files_from_args<I: Iterator<Item = String>>(args: I) -> Vec<String> {
+    args.skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .filter(|arg| std::path::Path::new(arg).is_file())
+        .collect()
 }
 
 fn fast_hash(s: &str) -> u64 {
@@ -372,11 +416,26 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (tx, rx) = channel::<QueuedJob>();
-    let suppress_hide = Arc::new(AtomicBool::new(false));
+
+    // Starts true to match the frontend's default of a pinned window. If this
+    // began false, the window could hide itself during the gap before the
+    // webview finishes booting and pushes the real preference across — which
+    // looks exactly like the app failing to launch.
+    let suppress_hide = Arc::new(AtomicBool::new(true));
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // A second launch should surface the existing window, not open another.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // A second launch should hand its files to the running instance
+            // and surface the window, not open a rival copy.
+            let files = files_from_args(argv.into_iter());
+            if !files.is_empty() {
+                app.state::<AppState>()
+                    .pending_files
+                    .lock()
+                    .unwrap()
+                    .extend(files);
+                let _ = app.emit("files://open", ());
+            }
             tray::show_popup(app, None);
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -393,6 +452,8 @@ pub fn run() {
             bins: ffmpeg::resolve(),
             cancels: Mutex::new(HashMap::new()),
             queue: tx,
+            pending_files: Mutex::new(files_from_args(std::env::args())),
+            show_on_ready: Arc::new(AtomicBool::new(false)),
             suppress_hide: Arc::clone(&suppress_hide),
         })
         .invoke_handler(tauri::generate_handler![
@@ -404,6 +465,8 @@ pub fn run() {
             set_suppress_hide,
             hide_window,
             quit_app,
+            take_pending_files,
+            frontend_ready,
         ])
         .setup(move |app| {
             tray::setup(app.handle(), Arc::clone(&suppress_hide))?;
@@ -416,16 +479,8 @@ pub fn run() {
                 .unwrap_or(1);
             spawn_workers(app.handle().clone(), rx, workers);
 
-            // In release the app lives in the tray and waits to be summoned.
-            // While developing, having to click the tray on every rebuild gets
-            // old fast.
-            if cfg!(debug_assertions) {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
-            }
-
+            // Whether the window appears at startup is decided in
+            // `frontend_ready`, once there's actually something to show.
             Ok(())
         })
         .run(tauri::generate_context!())

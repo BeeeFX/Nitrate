@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   disable as disableAutostart,
   enable as enableAutostart,
@@ -75,6 +74,23 @@ class AppStore {
     }
 
     this.ready = true;
+
+    // Tells Rust the UI has painted, so the window can be revealed without the
+    // user glimpsing an empty frame first.
+    await invoke("frontend_ready").catch(() => {});
+
+    // Anything passed on the command line — "Open with", or a file dropped
+    // onto the shortcut — is waiting in Rust until now.
+    await this.#drainPendingFiles();
+  }
+
+  async #drainPendingFiles() {
+    try {
+      const files = await invoke<string[]>("take_pending_files");
+      if (files.length > 0) await this.addFiles(files);
+    } catch {
+      // No pending files, or the command isn't available in this context.
+    }
   }
 
   async #restore() {
@@ -179,6 +195,10 @@ class AppStore {
       },
     );
 
+    // A second launch hands its files to this instance rather than opening
+    // a rival copy.
+    await listen("files://open", () => void this.#drainPendingFiles());
+
     await listen<{ id: string }>("job://cancelled", ({ payload }) => {
       const job = this.#find(payload.id);
       if (!job) return;
@@ -195,8 +215,9 @@ class AppStore {
     );
 
     for (const path of fresh) {
-      const job: Job = {
-        id: `job-${nextId++}`,
+      const id = `job-${nextId++}`;
+      this.jobs.push({
+        id,
         path,
         name: path.split(/[\\/]/).pop() ?? path,
         info: null,
@@ -211,17 +232,20 @@ class AppStore {
         error: null,
         notes: [],
         startedAt: null,
-      };
-      this.jobs.push(job);
+      });
+
+      // `push` stores a reactive proxy, not the object literal above. Mutating
+      // the literal would update nothing the UI can see, so everything from
+      // here on has to go through the copy the array actually holds.
+      const job = this.#find(id);
+      if (!job) continue;
 
       try {
         const details = await invoke<FileInfo>("inspect_file", { path });
         job.info = details.info;
         job.name = details.name;
         job.originalBytes = details.info.sizeBytes;
-        job.thumbnail = details.thumbnail
-          ? convertFileSrc(details.thumbnail)
-          : null;
+        job.thumbnail = details.thumbnail;
         job.stage = "Ready";
         await this.#loadPlan(job);
 
