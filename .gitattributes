@@ -1,0 +1,15 @@
+# Normalise line endings so Windows and Unix contributors don't fight over them.
+* text=auto eol=lf
+
+# Windows-only tooling that genuinely wants CRLF.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Never touch binary content.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.mp4 binary
+*.exe binary

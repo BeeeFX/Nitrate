@@ -1,0 +1,449 @@
+<script lang="ts">
+  import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+  import {
+    formatBitrate,
+    formatDuration,
+    formatEta,
+    formatSize,
+    truncateName,
+  } from "../format";
+  import { app, etaFor } from "../state.svelte";
+  import type { Job } from "../types";
+
+  interface Props {
+    job: Job;
+  }
+
+  let { job }: Props = $props();
+
+  let eta = $state<number | null>(null);
+
+  // Recomputing on a timer rather than per progress event keeps the estimate
+  // from flickering on every one of ffmpeg's frequent updates.
+  $effect(() => {
+    if (job.status !== "running") {
+      eta = null;
+      return;
+    }
+    const tick = () => (eta = etaFor(job));
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  });
+
+  let saved = $derived(
+    job.finalBytes && job.originalBytes
+      ? Math.max(0, Math.round((1 - job.finalBytes / job.originalBytes) * 100))
+      : null,
+  );
+
+  let percent = $derived(Math.round(job.progress * 100));
+</script>
+
+<article class="card" class:done={job.status === "done"} class:failed={job.status === "failed"}>
+  <div class="top">
+    <div class="thumb" class:empty={!job.thumbnail}>
+      {#if job.thumbnail}
+        <img src={job.thumbnail} alt="" />
+      {:else}
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1zm6 3.5v7l6-3.5z"
+            fill="currentColor"
+          />
+        </svg>
+      {/if}
+
+      {#if job.status === "done"}
+        <span class="badge ok" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path
+              d="M5 13l4 4L19 7"
+              stroke="currentColor"
+              stroke-width="3"
+              fill="none"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </span>
+      {/if}
+    </div>
+
+    <div class="info">
+      <div class="name" title={job.name}>{truncateName(job.name)}</div>
+
+      <div class="meta tnum">
+        {#if job.status === "failed"}
+          <span class="err">{job.error}</span>
+        {:else if job.status === "done" && job.finalBytes}
+          <span class="from">{formatSize(job.originalBytes ?? 0)}</span>
+          <span class="arrow">→</span>
+          <span class="to">{formatSize(job.finalBytes)}</span>
+          {#if saved !== null}<span class="saved">−{saved}%</span>{/if}
+        {:else if job.info}
+          <span>{formatSize(job.info.sizeBytes)}</span>
+          <span class="dot">·</span>
+          <span>{formatDuration(job.info.duration)}</span>
+          {#if job.plan}
+            <span class="dot">·</span>
+            <span class:downscale={job.plan.downscaled}>
+              {job.plan.height}p
+            </span>
+            <span class="dot">·</span>
+            <span>{formatBitrate(job.plan.videoKbps)}</span>
+          {/if}
+        {:else}
+          <span class="dim">{job.stage}</span>
+        {/if}
+      </div>
+    </div>
+
+    <div class="actions">
+      {#if job.status === "running" || job.status === "queued"}
+        <button class="act" onclick={() => app.cancel(job.id)} title="Cancel">
+          <svg viewBox="0 0 24 24"
+            ><path
+              d="M6 6l12 12M18 6L6 18"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+            /></svg
+          >
+        </button>
+      {:else if job.status === "done"}
+        <button
+          class="act"
+          onclick={() => job.output && openPath(job.output)}
+          title="Play"
+        >
+          <svg viewBox="0 0 24 24"><path d="M8 5l12 7-12 7z" fill="currentColor" /></svg>
+        </button>
+        <button
+          class="act"
+          onclick={() => job.output && revealItemInDir(job.output)}
+          title="Show in folder"
+        >
+          <svg viewBox="0 0 24 24"
+            ><path
+              d="M3 6a1 1 0 011-1h5l2 2h9a1 1 0 011 1v11a1 1 0 01-1 1H4a1 1 0 01-1-1z"
+              fill="currentColor"
+            /></svg
+          >
+        </button>
+      {:else}
+        <button class="act" onclick={() => app.start(job.id)} title="Retry">
+          <svg viewBox="0 0 24 24"
+            ><path
+              d="M4 12a8 8 0 1 1 2.5 5.8M4 19v-5h5"
+              stroke="currentColor"
+              stroke-width="2.2"
+              fill="none"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            /></svg
+          >
+        </button>
+      {/if}
+
+      <button class="act dim-act" onclick={() => app.remove(job.id)} title="Remove">
+        <svg viewBox="0 0 24 24"
+          ><path
+            d="M5 7h14M10 11v6M14 11v6M6 7l1 12a1 1 0 001 1h8a1 1 0 001-1l1-12M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"
+            stroke="currentColor"
+            stroke-width="1.8"
+            fill="none"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          /></svg
+        >
+      </button>
+    </div>
+  </div>
+
+  {#if job.status === "running" || job.status === "queued"}
+    <div class="progress">
+      <div class="track">
+        <div
+          class="fill"
+          class:indeterminate={job.status === "queued"}
+          style:width="{job.status === 'queued' ? 100 : percent}%"
+        ></div>
+      </div>
+      <div class="status">
+        <span class="stage">{job.stage}</span>
+        <span class="right tnum">
+          {#if eta}<span class="eta">{formatEta(eta)}</span>{/if}
+          {#if job.status === "running"}<span class="pct">{percent}%</span>{/if}
+        </span>
+      </div>
+    </div>
+  {/if}
+
+  {#if job.status === "done" && job.notes.length > 0}
+    <ul class="notes">
+      {#each job.notes as note}<li>{note}</li>{/each}
+    </ul>
+  {/if}
+</article>
+
+<style>
+  .card {
+    padding: 10px;
+    border-radius: var(--radius);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    /* A faint top highlight is what sells the surface as glass rather than fill. */
+    background-image: linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.045),
+      transparent 40%
+    );
+    animation: rise 0.32s var(--ease-spring);
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px) scale(0.985);
+    }
+  }
+
+  .card.done {
+    border-color: rgba(67, 181, 129, 0.3);
+  }
+
+  .card.failed {
+    border-color: rgba(237, 66, 69, 0.35);
+  }
+
+  .top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .thumb {
+    position: relative;
+    flex-shrink: 0;
+    width: 46px;
+    height: 46px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.28);
+  }
+
+  .thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .thumb.empty {
+    display: grid;
+    place-items: center;
+    color: var(--text-faint);
+  }
+
+  .thumb.empty svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .badge {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(10, 12, 18, 0.62);
+    color: var(--success);
+    animation: pop 0.34s var(--ease-spring);
+  }
+
+  .badge svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  @keyframes pop {
+    from {
+      opacity: 0;
+      transform: scale(0.6);
+    }
+  }
+
+  .info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .name {
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .dot {
+    color: var(--text-faint);
+  }
+
+  .dim {
+    color: var(--text-faint);
+  }
+
+  .arrow {
+    color: var(--text-faint);
+  }
+
+  .to {
+    color: var(--success);
+    font-weight: 650;
+  }
+
+  .saved {
+    padding: 1px 5px;
+    border-radius: 5px;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--success);
+    background: rgba(67, 181, 129, 0.15);
+  }
+
+  .downscale {
+    color: var(--warn);
+  }
+
+  .err {
+    color: var(--danger);
+    line-height: 1.35;
+  }
+
+  .actions {
+    display: flex;
+    gap: 1px;
+    flex-shrink: 0;
+  }
+
+  .act {
+    display: grid;
+    place-items: center;
+    width: 27px;
+    height: 27px;
+    border-radius: 7px;
+    color: var(--text-dim);
+    transition: background 0.14s, color 0.14s;
+  }
+
+  .act svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .act:hover {
+    background: var(--surface-strong);
+    color: var(--text);
+  }
+
+  .dim-act {
+    color: var(--text-faint);
+  }
+
+  .dim-act:hover {
+    color: var(--danger);
+    background: rgba(237, 66, 69, 0.14);
+  }
+
+  .progress {
+    margin-top: 9px;
+  }
+
+  .track {
+    height: 4px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+  }
+
+  .fill {
+    position: relative;
+    height: 100%;
+    border-radius: 99px;
+    background: linear-gradient(90deg, var(--blurple), var(--blurple-bright));
+    box-shadow: 0 0 12px rgba(88, 101, 242, 0.75);
+    transition: width 0.25s ease-out;
+  }
+
+  /* A travelling sheen makes it obvious work is happening even when the
+     bar itself is barely moving. */
+  .fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.55),
+      transparent
+    );
+    animation: sheen 1.5s linear infinite;
+  }
+
+  @keyframes sheen {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(100%);
+    }
+  }
+
+  .fill.indeterminate {
+    opacity: 0.35;
+    transition: none;
+  }
+
+  .status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 5px;
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+
+  .right {
+    display: flex;
+    gap: 7px;
+    align-items: baseline;
+  }
+
+  .eta {
+    color: var(--text-faint);
+  }
+
+  .pct {
+    font-weight: 700;
+    color: var(--blurple-bright);
+  }
+
+  .notes {
+    margin-top: 8px;
+    padding-left: 14px;
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: var(--text-faint);
+  }
+</style>

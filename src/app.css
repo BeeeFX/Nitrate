@@ -1,0 +1,115 @@
+/* Design tokens and global chrome for Nitrate. */
+
+:root {
+  /* Blurple family — the accent the whole UI hangs off. */
+  --blurple: #5865f2;
+  --blurple-bright: #7c88ff;
+  --blurple-deep: #4149c9;
+
+  /* Glass surfaces sit on top of the OS acrylic backdrop, so they're all
+     translucent white rather than opaque greys. */
+  --scrim: rgba(14, 15, 22, 0.74);
+  --surface: rgba(255, 255, 255, 0.045);
+  --surface-hover: rgba(255, 255, 255, 0.075);
+  --surface-strong: rgba(255, 255, 255, 0.1);
+  --hairline: rgba(255, 255, 255, 0.09);
+  --hairline-bright: rgba(255, 255, 255, 0.16);
+
+  --text: #edeef4;
+  --text-dim: #9ba0b4;
+  --text-faint: #6b7086;
+
+  --success: #43b581;
+  --danger: #ed4245;
+  --warn: #faa81a;
+
+  --radius-lg: 16px;
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system,
+    "Inter", sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  /* Transparent so the native acrylic shows through; the scrim below darkens it. */
+  background: transparent;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+#app {
+  height: 100vh;
+}
+
+/* Numbers that change rapidly shouldn't make the layout jitter. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* A slim, unobtrusive scrollbar that matches the glass treatment. */
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+  background-clip: content-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--blurple-bright);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

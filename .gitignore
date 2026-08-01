@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ffmpeg sidecars — ~260 MB, fetched by `npm run ffmpeg` (runs on postinstall)
+src-tauri/binaries/
+
+# Generated from assets/icon.svg by `npm run icons`
+assets/icon.png
+
+# Updater signing key — must never be committed; lives in GitHub secrets
+*.key
+*.key.pub
+
+# Editor / OS
+.claude/settings.local.json
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log

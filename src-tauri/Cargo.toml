@@ -1,0 +1,38 @@
+[package]
+name = "nitrate"
+version = "0.1.0"
+description = "Drag, drop, done. Compress any video to fit Discord's upload limits."
+authors = ["Nitrate contributors"]
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+repository = "https://github.com/BeeeFX/Nitrate"
+
+[lib]
+name = "nitrate_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `protocol-asset` lets the webview load thumbnails straight off disk.
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-os = "2"
+tauri-plugin-store = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Hides the console window that would otherwise flash on every ffmpeg invocation.
+windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
