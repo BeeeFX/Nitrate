@@ -307,6 +307,37 @@ fn s(v: &str) -> String {
     v.to_string()
 }
 
+/// Guards against a preset saved for a different encoder. The UI repairs this
+/// when you switch codec, but a settings file written by an older build
+/// shouldn't reach ffmpeg as `-preset medium` on an encoder wanting a number.
+fn x26x_preset(preset: &str) -> &str {
+    const VALID: &[&str] = &[
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+    ];
+    if VALID.contains(&preset) {
+        preset
+    } else {
+        "medium"
+    }
+}
+
+/// Clamps a numeric preset into the range its encoder accepts.
+fn numeric_preset(preset: &str, min: u32, max: u32, fallback: u32) -> String {
+    preset
+        .parse::<u32>()
+        .map(|n| n.clamp(min, max))
+        .unwrap_or(fallback)
+        .to_string()
+}
+
 /// Builds the argument list for one ffmpeg pass.
 ///
 /// `pass` is `None` for a single-pass encode, or `Some(1 | 2)` for two-pass.
@@ -339,28 +370,63 @@ fn build_args(
     args.push(s("-b:v"));
     args.push(format!("{}k", plan.video_kbps));
 
-    // Encoder-specific knobs.
+    // Encoder-specific knobs. Every encoder spells "how hard should I work"
+    // differently, so the UI's preset is translated here rather than there.
     let is_hardware = !plan.encoder.starts_with("lib");
+    let preset = settings.preset.as_str();
+
     match plan.encoder.as_str() {
         "libx264" | "libx265" => {
-            args.push(s("-preset"));
-            args.push(settings.preset.clone());
+            args.extend([s("-preset"), s(x26x_preset(preset))]);
         }
         "libvpx-vp9" => {
-            // Multithreaded row encoding; VP9 is painfully slow without it.
+            // Row threading is not optional — VP9 is glacial without it.
+            // Note cpu-used runs backwards: higher means less effort.
             args.extend([
                 s("-row-mt"),
                 s("1"),
                 s("-deadline"),
                 s("good"),
                 s("-cpu-used"),
-                s("2"),
+                numeric_preset(preset, 0, 5, 2),
             ]);
         }
         "libsvtav1" => {
-            args.push(s("-preset"));
-            args.push(s("6"));
+            args.extend([s("-preset"), numeric_preset(preset, 0, 13, 6)]);
         }
+        e if e.contains("nvenc") => {
+            args.extend([
+                s("-preset"),
+                s(match preset {
+                    "quality" => "p7",
+                    "speed" => "p1",
+                    _ => "p4",
+                }),
+                s("-rc"),
+                s("vbr"),
+            ]);
+        }
+        e if e.contains("qsv") => {
+            args.extend([
+                s("-preset"),
+                s(match preset {
+                    "quality" => "veryslow",
+                    "speed" => "veryfast",
+                    _ => "medium",
+                }),
+            ]);
+        }
+        e if e.contains("amf") => {
+            args.extend([
+                s("-quality"),
+                s(match preset {
+                    "quality" => "quality",
+                    "speed" => "speed",
+                    _ => "balanced",
+                }),
+            ]);
+        }
+        // videotoolbox exposes no comparable effort control.
         _ => {}
     }
 

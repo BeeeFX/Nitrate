@@ -1,8 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import {
+  disable as disableAutostart,
+  enable as enableAutostart,
+  isEnabled as autostartIsEnabled,
+} from "@tauri-apps/plugin-autostart";
 import { load, type Store } from "@tauri-apps/plugin-store";
-import { DEFAULT_SETTINGS, audioCodecsFor, containersFor } from "./presets";
+import {
+  DEFAULT_SETTINGS,
+  audioCodecsFor,
+  containersFor,
+  defaultPresetFor,
+  presetsFor,
+} from "./presets";
 import type {
   Capabilities,
   FileInfo,
@@ -17,9 +28,15 @@ class AppStore {
   jobs = $state<Job[]>([]);
   settings = $state<Settings>({ ...DEFAULT_SETTINGS });
   caps = $state<Capabilities | null>(null);
-  /** Set while a native dialog is open, so the popup doesn't hide itself. */
-  pinned = $state(false);
+  /**
+   * Keeps the popup open when it loses focus. On by default — a window that
+   * vanishes the moment you click elsewhere is startling, and you often want
+   * to watch progress while doing something else.
+   */
+  pinned = $state(true);
   autoStart = $state(true);
+  /** Mirrors the OS setting rather than our own store, which is authoritative. */
+  launchAtLogin = $state(false);
   ready = $state(false);
 
   #store: Store | null = null;
@@ -41,6 +58,16 @@ class AppStore {
     await this.#restore();
     await this.#wireEvents();
 
+    // The restored pin state has to be pushed to Rust, which owns the
+    // hide-on-blur behaviour.
+    await invoke("set_suppress_hide", { suppress: this.pinned }).catch(() => {});
+
+    try {
+      this.launchAtLogin = await autostartIsEnabled();
+    } catch {
+      this.launchAtLogin = false;
+    }
+
     try {
       this.caps = await invoke<Capabilities>("capabilities");
     } catch {
@@ -57,6 +84,8 @@ class AppStore {
       if (saved) this.settings = { ...DEFAULT_SETTINGS, ...saved };
       const auto = await this.#store.get<boolean>("autoStart");
       if (typeof auto === "boolean") this.autoStart = auto;
+      const pinned = await this.#store.get<boolean>("pinned");
+      if (typeof pinned === "boolean") this.pinned = pinned;
     } catch {
       // First run, or the store is unreadable — defaults are fine.
     }
@@ -67,6 +96,7 @@ class AppStore {
     try {
       await this.#store.set("settings", $state.snapshot(this.settings));
       await this.#store.set("autoStart", this.autoStart);
+      await this.#store.set("pinned", this.pinned);
       await this.#store.save();
     } catch {
       // Losing preferences isn't worth interrupting the user over.
@@ -83,6 +113,15 @@ class AppStore {
     }
     const allowedAudio = audioCodecsFor(next.container);
     if (!allowedAudio.includes(next.audioCodec)) next.audioCodec = allowedAudio[0];
+
+    // Presets are encoder-specific — "medium" means nothing to VP9, which wants
+    // a number. Switching codec or toggling hardware has to re-base it.
+    if (patch.videoCodec !== undefined || patch.hardware !== undefined) {
+      const valid = presetsFor(next.videoCodec, next.hardware).map((p) => p.value);
+      if (!valid.includes(next.preset)) {
+        next.preset = defaultPresetFor(next.videoCodec, next.hardware);
+      }
+    }
 
     this.settings = next;
     void this.persist();
@@ -257,10 +296,8 @@ class AppStore {
     this.jobs = this.jobs.filter((j) => j.id !== id);
   }
 
+  /** Drops everything that's finished, one way or another. */
   clearFinished() {
-    for (const job of this.jobs) {
-      if (job.status === "running" || job.status === "queued") continue;
-    }
     this.jobs = this.jobs.filter(
       (j) => j.status === "running" || j.status === "queued",
     );
@@ -282,6 +319,21 @@ class AppStore {
   async setPinned(value: boolean) {
     this.pinned = value;
     await invoke("set_suppress_hide", { suppress: value });
+    void this.persist();
+  }
+
+  /** The OS owns this setting, so re-read it rather than trusting our own flag. */
+  async setLaunchAtLogin(value: boolean) {
+    try {
+      if (value) {
+        await enableAutostart();
+      } else {
+        await disableAutostart();
+      }
+      this.launchAtLogin = await autostartIsEnabled();
+    } catch {
+      this.launchAtLogin = false;
+    }
   }
 }
 

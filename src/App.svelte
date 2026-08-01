@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { onMount } from "svelte";
   import AdvancedPanel from "./lib/components/AdvancedPanel.svelte";
@@ -6,10 +7,32 @@
   import JobCard from "./lib/components/JobCard.svelte";
   import TargetPicker from "./lib/components/TargetPicker.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
+  import UpdateBanner from "./lib/components/UpdateBanner.svelte";
   import { app } from "./lib/state.svelte";
+  import { updater } from "./lib/updater.svelte";
 
   let hovering = $state(false);
   let settingsOpen = $state(false);
+  let shell = $state<HTMLElement | null>(null);
+
+  /**
+   * Replayed every time the tray reveals the window. The Web Animations API is
+   * used rather than a CSS class because it can be re-triggered on demand — a
+   * CSS animation only runs once unless the element is torn down and rebuilt,
+   * which would throw away the job queue.
+   */
+  function playEntrance() {
+    if (!shell) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    shell.animate(
+      [
+        { opacity: 0, transform: "scale(0.96) translateY(10px)" },
+        { opacity: 1, transform: "scale(1) translateY(0)" },
+      ],
+      { duration: 240, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+    );
+  }
 
   let finished = $derived(app.jobs.filter((j) => j.status === "done").length);
   let hasJobs = $derived(app.jobs.length > 0);
@@ -19,6 +42,10 @@
 
   onMount(() => {
     void app.init();
+    updater.start();
+    playEntrance();
+
+    const shown = listen("popup://shown", () => playEntrance());
 
     // Tauri's own drag-drop gives real filesystem paths, which the HTML5
     // drop event can't provide inside a webview.
@@ -34,15 +61,19 @@
     });
 
     return () => {
+      updater.stop();
       void pending.then((unlisten) => unlisten());
+      void shown.then((unlisten) => unlisten());
     };
   });
 </script>
 
-<main class="shell" class:busy={app.busy}>
+<main class="shell" class:busy={app.busy} bind:this={shell}>
   <div class="ambient" aria-hidden="true"></div>
 
   <TitleBar {settingsOpen} onToggleSettings={() => (settingsOpen = !settingsOpen)} />
+
+  <UpdateBanner />
 
   {#if !settingsOpen}
     <TargetPicker />

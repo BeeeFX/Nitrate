@@ -5,11 +5,11 @@
     AUDIO_CODECS,
     CONTAINERS,
     FPS_CAPS,
-    PRESETS,
     RESOLUTION_CAPS,
     VIDEO_CODECS,
     audioCodecsFor,
     containersFor,
+    presetsFor,
   } from "../presets";
   import { app } from "../state.svelte";
   import type { AudioCodec, Container, VideoCodec } from "../types";
@@ -18,6 +18,8 @@
   let allowedContainers = $derived(containersFor(s.videoCodec));
   let allowedAudio = $derived(audioCodecsFor(s.container));
   let hwAvailable = $derived((app.caps?.hardwareEncoders.length ?? 0) > 0);
+  // Each encoder has its own effort scale, so the options change with it.
+  let presets = $derived(presetsFor(s.videoCodec, s.hardware));
 
   let activeCodec = $derived(VIDEO_CODECS.find((c) => c.id === s.videoCodec));
 
@@ -103,8 +105,8 @@
           value={s.preset}
           onchange={(e) => app.update({ preset: e.currentTarget.value })}
         >
-          {#each PRESETS as preset}
-            <option value={preset}>{preset}</option>
+          {#each presets as preset (preset.value)}
+            <option value={preset.value}>{preset.label}</option>
           {/each}
         </select>
       </div>
@@ -227,6 +229,35 @@
             app.autoStart = e.currentTarget.checked;
             void app.persist();
           }}
+        />
+      </label>
+    </div>
+
+    <!-- Behaviour -->
+    <div class="group">
+      <div class="group-label">Behaviour</div>
+
+      <label class="toggle-row">
+        <span class="toggle-text">
+          <span class="row-label">Start with the computer</span>
+          <span class="sub">Launch to the tray when you sign in.</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={app.launchAtLogin}
+          onchange={(e) => app.setLaunchAtLogin(e.currentTarget.checked)}
+        />
+      </label>
+
+      <label class="toggle-row">
+        <span class="toggle-text">
+          <span class="row-label">Keep the window open</span>
+          <span class="sub">Stay visible when you click elsewhere.</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={app.pinned}
+          onchange={(e) => app.setPinned(e.currentTarget.checked)}
         />
       </label>
     </div>

@@ -43,9 +43,21 @@
       }
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/BeeeFX/Nitrate/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERFRkZFQUQ5QTA0Q0NEMEIKUldRTHpVeWcyZXIvM3NhRnJreE8rUFd1N1NtcmFzNGR1anNYbVQyMDRYdzRNR2lPa3FndW11L3cK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi", "app", "dmg", "deb", "appimage"],
+    "targets": ["nsis", "app", "dmg", "deb", "appimage"],
+    "createUpdaterArtifacts": true,
     "category": "Utility",
     "shortDescription": "Compress video to fit Discord's upload limits",
     "longDescription": "Nitrate compresses any video to a target file size — Discord's 10MB free limit, Nitro tiers, or any size you pick. Drag, drop, done.",

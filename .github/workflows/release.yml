@@ -69,13 +69,23 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts. Without these the build still produces
+          # an installer, but auto-update will reject it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Nitrate ${{ github.ref_name }}"
           releaseBody: |
             Drop a video, get it back under Discord's limit.
 
+            **Windows:** download the `.exe` installer below.
+
             Bundled ffmpeg is GPL v3 — see THIRD-PARTY.md.
+          # Draft so a broken build can't ship itself. Note that auto-update
+          # only sees the release once it's published.
           releaseDraft: true
           prerelease: false
+          # Emits latest.json, which the updater endpoint points at.
+          includeUpdaterJson: true
           args: ${{ matrix.args }}

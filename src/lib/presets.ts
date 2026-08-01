@@ -42,16 +42,76 @@ export const AUDIO_CODECS: { id: AudioCodec; label: string }[] = [
   { id: "none", label: "None" },
 ];
 
-export const PRESETS = [
-  "ultrafast",
-  "superfast",
-  "veryfast",
-  "faster",
-  "fast",
-  "medium",
-  "slow",
-  "slower",
+export interface PresetOption {
+  value: string;
+  label: string;
+}
+
+/**
+ * Every encoder spells "how hard should I work" differently: x264 and x265 take
+ * named presets, VP9 takes a `cpu-used` number that counts the wrong way round,
+ * SVT-AV1 takes 0–13, and each GPU vendor has its own scale again. Rather than
+ * leak that, hardware encoders get three plain choices which `encode.rs` maps
+ * to whatever the chosen encoder actually wants.
+ */
+const X264_PRESETS: PresetOption[] = [
+  { value: "ultrafast", label: "Ultrafast" },
+  { value: "superfast", label: "Superfast" },
+  { value: "veryfast", label: "Very fast" },
+  { value: "faster", label: "Faster" },
+  { value: "fast", label: "Fast" },
+  { value: "medium", label: "Medium" },
+  { value: "slow", label: "Slow" },
+  { value: "slower", label: "Slower (best)" },
 ];
+
+// VP9's scale is inverted: higher cpu-used means less effort.
+const VP9_PRESETS: PresetOption[] = [
+  { value: "5", label: "Fastest" },
+  { value: "4", label: "Faster" },
+  { value: "3", label: "Fast" },
+  { value: "2", label: "Balanced" },
+  { value: "1", label: "Slow" },
+  { value: "0", label: "Slowest (best)" },
+];
+
+const AV1_PRESETS: PresetOption[] = [
+  { value: "10", label: "Fastest" },
+  { value: "8", label: "Faster" },
+  { value: "6", label: "Balanced" },
+  { value: "4", label: "Slow" },
+  { value: "2", label: "Slower (best)" },
+];
+
+const HARDWARE_PRESETS: PresetOption[] = [
+  { value: "speed", label: "Fastest" },
+  { value: "balanced", label: "Balanced" },
+  { value: "quality", label: "Best quality" },
+];
+
+export function presetsFor(codec: VideoCodec, hardware: boolean): PresetOption[] {
+  if (hardware) return HARDWARE_PRESETS;
+  switch (codec) {
+    case "vp9":
+      return VP9_PRESETS;
+    case "av1":
+      return AV1_PRESETS;
+    default:
+      return X264_PRESETS;
+  }
+}
+
+export function defaultPresetFor(codec: VideoCodec, hardware: boolean): string {
+  if (hardware) return "balanced";
+  switch (codec) {
+    case "vp9":
+      return "2";
+    case "av1":
+      return "6";
+    default:
+      return "medium";
+  }
+}
 
 export const AUDIO_BITRATES = [64, 96, 128, 160, 192, 256];
 

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, PhysicalPosition, Rect, WebviewWindow, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect, WebviewWindow, WindowEvent};
 
 pub fn setup(app: &AppHandle, suppress_hide: Arc<AtomicBool>) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Nitrate", true, None::<&str>)?;
@@ -17,12 +17,7 @@ pub fn setup(app: &AppHandle, suppress_hide: Arc<AtomicBool>) -> tauri::Result<(
         // Left click drives the popup; the menu is for right click only.
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
-            }
+            "show" => show_popup(app, None),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -79,12 +74,24 @@ fn toggle_popup(app: &AppHandle, tray_rect: Option<Rect>) {
         return;
     }
 
+    show_popup(app, tray_rect);
+}
+
+/// Shows the popup and tells the frontend, which plays its entrance animation.
+/// Positioning happens before `show` so the window never appears at its old
+/// spot and then jumps.
+pub fn show_popup(app: &AppHandle, tray_rect: Option<Rect>) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
     if let Some(rect) = tray_rect {
         position_near_tray(&window, rect);
     }
 
     let _ = window.show();
     let _ = window.set_focus();
+    let _ = app.emit("popup://shown", ());
 }
 
 /// Anchors the popup to the tray icon, flipping to whichever side of the

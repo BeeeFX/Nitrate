@@ -137,6 +137,57 @@ fn refuses_targets_that_cannot_work() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Encodes a deliberately tiny clip so codec-specific checks stay quick.
+fn encode_small(tag: &str, mutate: impl FnOnce(&mut Settings)) -> Result<u64, String> {
+    let dir = temp_dir(tag);
+    let input = make_clip(&dir, "input.mp4", "320x240", 24, 3, 1200);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    let mut settings = settings(400_000, &dir);
+    mutate(&mut settings);
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = encode::run_job(&bins, &input, &settings, &info, &cancel, |_, _| {})
+        .map(|r| r.map(|o| o.final_bytes).unwrap_or(0));
+
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+#[test]
+fn vp9_accepts_its_own_preset_scale() {
+    // VP9 spells effort as a `cpu-used` number, not an x264-style name.
+    let bytes = encode_small("vp9", |s| {
+        s.video_codec = VideoCodec::Vp9;
+        s.container = Container::Webm;
+        s.audio_codec = AudioCodec::Opus;
+        s.preset = "5".into();
+        // VP9 two-pass is slow and isn't what's under test here.
+        s.two_pass = false;
+    })
+    .expect("VP9 encode should succeed");
+
+    assert!(bytes > 0, "VP9 produced an empty file");
+}
+
+#[test]
+fn survives_a_preset_left_over_from_another_encoder() {
+    // A settings file written while H.264 was selected would leave "medium"
+    // behind, which VP9 would reject outright as a cpu-used value.
+    let bytes = encode_small("stale-preset", |s| {
+        s.video_codec = VideoCodec::Vp9;
+        s.container = Container::Webm;
+        s.audio_codec = AudioCodec::Opus;
+        s.preset = "medium".into();
+        s.two_pass = false;
+    })
+    .expect("a stale preset should be sanitised, not passed through");
+
+    assert!(bytes > 0, "produced an empty file");
+}
+
 #[test]
 fn probe_reads_the_essentials() {
     let dir = temp_dir("probe");
