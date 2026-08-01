@@ -63,8 +63,10 @@ and run it. It installs for your user only, so there's no admin prompt.
 > tool. Click **More info → Run anyway**. Updates *are* cryptographically signed;
 > that's a separate thing, covered below.
 
-macOS and Linux builds come out of the same CI pipeline but are **untested** —
-treat them as experimental.
+**Windows only for now.** The code is cross-platform and the release workflow
+already has macOS and Linux entries, but they're commented out until someone has
+actually run the result — macOS in particular needs an arm64 ffmpeg build before
+it can ship anything trustworthy. See `.github/workflows/release.yml`.
 
 ### Updates take care of themselves
 

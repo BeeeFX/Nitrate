@@ -17,17 +17,21 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             args: ""
-          # macOS and Linux build from the same source but aren't verified —
-          # drop them from this list if a broken build is worse than no build.
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-            args: "--target aarch64-apple-darwin"
-          - platform: macos-latest
-            target: x86_64-apple-darwin
-            args: "--target x86_64-apple-darwin"
-          - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            args: ""
+
+          # Linux builds from the same source and should work, but has never
+          # been run. Enable it once someone has actually launched the result.
+          # - platform: ubuntu-22.04
+          #   target: x86_64-unknown-linux-gnu
+          #   args: ""
+
+          # macOS needs work before it can ship. `scripts/fetch-ffmpeg.mjs`
+          # only has an x86_64 source (evermeet.cx publishes nothing for arm64),
+          # so an aarch64 build would bundle an Intel ffmpeg — that compiles
+          # cleanly and then fails on the user's machine. Find an arm64 ffmpeg
+          # build, or drop the aarch64 target and rely on Rosetta, first.
+          # - platform: macos-latest
+          #   target: x86_64-apple-darwin
+          #   args: "--target x86_64-apple-darwin"
 
     runs-on: ${{ matrix.platform }}
 
