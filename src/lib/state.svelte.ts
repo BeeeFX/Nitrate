@@ -13,12 +13,15 @@ import {
   defaultPresetFor,
   presetsFor,
 } from "./presets";
-import type {
-  Capabilities,
-  FileInfo,
-  Job,
-  Plan,
-  Settings,
+import {
+  emptyEdits,
+  type Capabilities,
+  type Edits,
+  type FileInfo,
+  type Job,
+  type Plan,
+  type Settings,
+  type UrlInfo,
 } from "./types";
 
 let nextId = 1;
@@ -37,6 +40,8 @@ class AppStore {
   /** Mirrors the OS setting rather than our own store, which is authoritative. */
   launchAtLogin = $state(false);
   ready = $state(false);
+  /** Id of the job whose editor is open, if any. */
+  editingId = $state<string | null>(null);
 
   #store: Store | null = null;
 
@@ -172,6 +177,7 @@ class AppStore {
       notes: string[];
       width: number;
       height: number;
+      passedThrough: boolean;
     }>("job://done", ({ payload }) => {
       const job = this.#find(payload.id);
       if (!job) return;
@@ -182,6 +188,15 @@ class AppStore {
       job.finalBytes = payload.finalBytes;
       job.originalBytes = payload.originalBytes;
       job.notes = payload.notes;
+      job.passedThrough = payload.passedThrough;
+
+      // A link had no local file until now. Point the job at what landed, so
+      // editing and re-compressing work on something that exists.
+      if (job.kind === "url") {
+        job.kind = "file";
+        job.path = payload.output;
+        void this.refresh(job.id);
+      }
     });
 
     await listen<{ id: string; error: string }>(
@@ -208,6 +223,81 @@ class AppStore {
     });
   }
 
+  /** The job whose editor is open. */
+  get editing(): Job | null {
+    return this.jobs.find((j) => j.id === this.editingId) ?? null;
+  }
+
+  async openEditor(id: string) {
+    this.editingId = id;
+    // The popup is too narrow to drag a crop rectangle in, so it grows.
+    await invoke("set_editor_size", { expanded: true }).catch(() => {});
+  }
+
+  async closeEditor() {
+    this.editingId = null;
+    await invoke("set_editor_size", { expanded: false }).catch(() => {});
+  }
+
+  setEdits(id: string, edits: Edits) {
+    const job = this.#find(id);
+    if (!job) return;
+    job.edits = edits;
+    void this.#loadPlan(job);
+  }
+
+  #blankJob(id: string, kind: "file" | "url"): Job {
+    return {
+      id,
+      kind,
+      url: null,
+      path: "",
+      name: "",
+      info: null,
+      thumbnail: null,
+      status: "queued",
+      progress: 0,
+      stage: "Reading…",
+      plan: null,
+      output: null,
+      finalBytes: null,
+      originalBytes: null,
+      error: null,
+      notes: [],
+      startedAt: null,
+      edits: emptyEdits(),
+      passedThrough: false,
+    };
+  }
+
+  /** Queues a pasted link. The fetch itself happens on a worker thread. */
+  async addUrl(url: string) {
+    const trimmed = url.trim();
+    if (this.jobs.some((j) => j.url === trimmed && j.status !== "done")) return;
+
+    const id = `job-${nextId++}`;
+    this.jobs.push({
+      ...this.#blankJob(id, "url"),
+      url: trimmed,
+      name: trimmed,
+      stage: "Reading link…",
+    });
+
+    const job = this.#find(id);
+    if (!job) return;
+
+    try {
+      const info = await invoke<UrlInfo>("inspect_url", { url: trimmed });
+      job.name = info.title;
+      job.stage = "Ready";
+      if (this.autoStart) await this.start(id);
+    } catch (err) {
+      job.status = "failed";
+      job.stage = "Failed";
+      job.error = String(err);
+    }
+  }
+
   /** Adds dropped or picked files, probing each before it appears settled. */
   async addFiles(paths: string[]) {
     const fresh = paths.filter(
@@ -217,21 +307,9 @@ class AppStore {
     for (const path of fresh) {
       const id = `job-${nextId++}`;
       this.jobs.push({
-        id,
+        ...this.#blankJob(id, "file"),
         path,
         name: path.split(/[\\/]/).pop() ?? path,
-        info: null,
-        thumbnail: null,
-        status: "queued",
-        progress: 0,
-        stage: "Reading…",
-        plan: null,
-        output: null,
-        finalBytes: null,
-        originalBytes: null,
-        error: null,
-        notes: [],
-        startedAt: null,
       });
 
       // `push` stores a reactive proxy, not the object literal above. Mutating
@@ -259,13 +337,29 @@ class AppStore {
   }
 
   async #loadPlan(job: Job) {
+    if (!job.path) return;
     try {
       job.plan = await invoke<Plan>("preview_plan", {
         path: job.path,
         settings: $state.snapshot(this.settings),
+        edits: $state.snapshot(job.edits),
       });
     } catch {
       job.plan = null;
+    }
+  }
+
+  /** Re-reads a job's file, for when it has changed underneath us. */
+  async refresh(id: string) {
+    const job = this.#find(id);
+    if (!job?.path) return;
+    try {
+      const details = await invoke<FileInfo>("inspect_file", { path: job.path });
+      job.info = details.info;
+      job.thumbnail = details.thumbnail;
+      await this.#loadPlan(job);
+    } catch {
+      // The file may have been moved or deleted; leave what we have.
     }
   }
 
@@ -291,8 +385,12 @@ class AppStore {
     try {
       await invoke("start_job", {
         id: job.id,
-        path: job.path,
+        // A link that hasn't been fetched yet has no path to send.
+        path: job.kind === "file" ? job.path : null,
+        url: job.kind === "url" ? job.url : null,
+        title: job.name,
         settings: $state.snapshot(this.settings),
+        edits: $state.snapshot(job.edits),
       });
     } catch (err) {
       job.status = "failed";

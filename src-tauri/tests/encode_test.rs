@@ -3,7 +3,7 @@
 //! The guarantee this app makes is "the output fits under the limit", so that's
 //! what these assert — against real ffmpeg, on a real file.
 
-use nitrate_lib::encode::{self, AudioCodec, Container, Settings, VideoCodec};
+use nitrate_lib::encode::{self, AudioCodec, Container, CropRect, Edits, Settings, VideoCodec};
 use nitrate_lib::ffmpeg;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,6 +61,8 @@ fn settings(target_bytes: u64, dir: &Path) -> Settings {
         preset: "veryfast".into(),
         two_pass: true,
         output_dir: Some(dir.to_string_lossy().into_owned()),
+        auto_compress_downloads: true,
+        max_download_height: 1080,
     }
 }
 
@@ -72,16 +74,18 @@ fn encode_to(target_bytes: u64, tag: &str) -> (u64, encode::Plan) {
     let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
     let cancel = Arc::new(AtomicBool::new(false));
 
-    let outcome = encode::run_job(
-        &bins,
-        &input,
-        &settings(target_bytes, &dir),
-        &info,
-        &cancel,
-        |_, _| {},
-    )
-    .expect("encode should not error")
-    .unwrap_or_else(|_| panic!("encode should not be cancelled"));
+    let set = settings(target_bytes, &dir);
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("encode should not error")
+        .unwrap_or_else(|_| panic!("encode should not be cancelled"));
 
     let bytes = outcome.final_bytes;
     let plan = outcome.plan;
@@ -131,7 +135,7 @@ fn refuses_targets_that_cannot_work() {
     let info = ffmpeg::probe(&bins, &input).unwrap();
 
     // 20 KB for an 8 second clip isn't achievable at any quality.
-    let result = encode::plan(&info, &settings(20_000, &dir), &bins);
+    let result = encode::plan(&info, &settings(20_000, &dir), &Edits::default(), &bins);
 
     assert!(result.is_err(), "should refuse an impossible target");
     let _ = std::fs::remove_dir_all(&dir);
@@ -149,7 +153,14 @@ fn encode_small(tag: &str, mutate: impl FnOnce(&mut Settings)) -> Result<u64, St
     mutate(&mut settings);
 
     let cancel = Arc::new(AtomicBool::new(false));
-    let result = encode::run_job(&bins, &input, &settings, &info, &cancel, |_, _| {})
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &settings,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+    let result = encode::run_job(&bins, &task, &cancel, |_, _| {})
         .map(|r| r.map(|o| o.final_bytes).unwrap_or(0));
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -186,6 +197,139 @@ fn survives_a_preset_left_over_from_another_encoder() {
     .expect("a stale preset should be sanitised, not passed through");
 
     assert!(bytes > 0, "produced an empty file");
+}
+
+/// Runs a job with edits applied, returning the finished size and plan.
+fn encode_with_edits(target_bytes: u64, tag: &str, edits: Edits) -> (u64, encode::Plan, f64) {
+    let dir = temp_dir(tag);
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 12, 6000);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    let set = settings(target_bytes, &dir);
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("encode should not error")
+        .unwrap_or_else(|_| panic!("encode should not be cancelled"));
+
+    let out_info = ffmpeg::probe(&bins, &outcome.output).expect("output should be readable");
+    let result = (outcome.final_bytes, outcome.plan, out_info.duration);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+#[test]
+fn trimming_shortens_the_output() {
+    let edits = Edits {
+        start: Some(3.0),
+        end: Some(8.0),
+        crop: None,
+    };
+    let (bytes, _, duration) = encode_with_edits(10_000_000, "trim", edits);
+
+    assert!(
+        (duration - 5.0).abs() < 0.6,
+        "expected a 5s clip, got {duration}s"
+    );
+    assert!(bytes <= 10_000_000, "output was {bytes} bytes, over target");
+}
+
+#[test]
+fn trimming_buys_quality_at_the_same_target() {
+    // The whole point of trimming: the same budget spread over less video.
+    // A tight target that forces a downscale on the full clip should hold its
+    // resolution once most of the clip is cut away.
+    let full = encode_with_edits(700_000, "trim-quality-full", Edits::default());
+    let trimmed = encode_with_edits(
+        700_000,
+        "trim-quality-cut",
+        Edits {
+            start: Some(0.0),
+            end: Some(2.0),
+            crop: None,
+        },
+    );
+
+    assert!(
+        trimmed.1.video_kbps > full.1.video_kbps * 2,
+        "trimming to a sixth of the clip should raise the bitrate sharply: \
+         full={} kbps, trimmed={} kbps",
+        full.1.video_kbps,
+        trimmed.1.video_kbps
+    );
+    assert!(
+        trimmed.1.height >= full.1.height,
+        "trimmed clip should not need a harsher downscale"
+    );
+}
+
+#[test]
+fn cropping_changes_the_output_shape() {
+    // A centred square out of a 1280x720 source: the full height, and 720/1280
+    // of the width, offset by half the difference.
+    let edits = Edits {
+        start: None,
+        end: None,
+        crop: Some(CropRect {
+            x: 0.21875,
+            y: 0.0,
+            width: 0.5625,
+            height: 1.0,
+        }),
+    };
+    let (bytes, plan, _) = encode_with_edits(10_000_000, "crop", edits);
+
+    let ratio = plan.width as f64 / plan.height as f64;
+    assert!(
+        (ratio - 1.0).abs() < 0.06,
+        "expected roughly square output, got {}x{}",
+        plan.width,
+        plan.height
+    );
+    assert!(bytes <= 10_000_000, "output was {bytes} bytes, over target");
+}
+
+#[test]
+fn a_file_that_already_fits_is_left_alone() {
+    let dir = temp_dir("passthrough");
+    // Small and short, so it lands well under the target on its own.
+    let input = make_clip(&dir, "input.mp4", "640x360", 24, 3, 400);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    let set = settings(10_000_000, &dir);
+
+    assert!(
+        info.size_bytes < 10_000_000,
+        "test clip should already fit, it was {} bytes",
+        info.size_bytes
+    );
+    assert!(
+        encode::can_pass_through(&info, &set, &Edits::default(), &input),
+        "a small mp4 with no edits should pass through untouched"
+    );
+
+    // Any edit means it has to be processed, however small it is.
+    let trimmed = Edits {
+        start: Some(1.0),
+        end: None,
+        crop: None,
+    };
+    assert!(
+        !encode::can_pass_through(&info, &set, &trimmed, &input),
+        "an edited file always needs re-encoding"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

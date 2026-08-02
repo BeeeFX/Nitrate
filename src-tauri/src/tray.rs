@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect, WebviewWindow, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Rect, WebviewWindow, WindowEvent,
+};
 
 pub fn setup(app: &AppHandle, suppress_hide: Arc<AtomicBool>) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Nitrate", true, None::<&str>)?;
@@ -92,6 +94,58 @@ pub fn show_popup(app: &AppHandle, tray_rect: Option<Rect>) {
     let _ = window.show();
     let _ = window.set_focus();
     let _ = app.emit("popup://shown", ());
+}
+
+/// Compact size, and the roomier one used while the editor is open.
+const COMPACT: (f64, f64) = (440.0, 660.0);
+const EXPANDED: (f64, f64) = (760.0, 800.0);
+
+/// Grows the popup for the editor and shrinks it back afterwards.
+///
+/// Resizing alone would happily push the window off the bottom-right of the
+/// screen, since that's where a tray-anchored popup usually sits, so the
+/// position is pulled back into view afterwards.
+pub fn resize_popup(app: &AppHandle, expanded: bool) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    let (w, h) = if expanded { EXPANDED } else { COMPACT };
+    if window.set_size(LogicalSize::new(w, h)).is_err() {
+        return;
+    }
+
+    clamp_into_monitor(&window);
+}
+
+/// Nudges the window back on screen after a resize.
+fn clamp_into_monitor(window: &WebviewWindow) {
+    const MARGIN: i32 = 12;
+
+    let (Ok(size), Ok(position)) = (window.outer_size(), window.outer_position()) else {
+        return;
+    };
+
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else { return };
+
+    let area = monitor.size();
+    let origin = monitor.position();
+    let max_x = origin.x + area.width as i32 - size.width as i32 - MARGIN;
+    let max_y = origin.y + area.height as i32 - size.height as i32 - MARGIN;
+
+    // A window taller than the screen would make the maximum smaller than the
+    // minimum, which clamp would panic on.
+    let x = position.x.min(max_x).max(origin.x + MARGIN);
+    let y = position.y.min(max_y).max(origin.y + MARGIN);
+
+    if x != position.x || y != position.y {
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    }
 }
 
 /// Anchors the popup to the tray icon, flipping to whichever side of the

@@ -1,16 +1,17 @@
 //! Nitrate — compress any video to fit a target file size.
 
 // Public so the integration tests can drive the encoder without a running app.
+pub mod download;
 pub mod encode;
 pub mod ffmpeg;
 mod tray;
 
 use base64::Engine as _;
-use encode::Settings;
+use encode::{Edits, Settings};
 use ffmpeg::{Binaries, MediaInfo};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -21,10 +22,18 @@ use tauri::{AppHandle, Emitter, Manager, State};
 // Shared state
 // ---------------------------------------------------------------------------
 
+/// Where a job's video comes from. A link has to be fetched before there's
+/// anything to encode; a file is ready immediately.
+enum JobSource {
+    File(PathBuf),
+    Url { url: String, title: String },
+}
+
 struct QueuedJob {
     id: String,
-    input: PathBuf,
+    source: JobSource,
     settings: Settings,
+    edits: Edits,
     cancel: Arc<AtomicBool>,
 }
 
@@ -65,6 +74,8 @@ struct DoneEvent {
     notes: Vec<String>,
     width: u32,
     height: u32,
+    /// True when the file was handed over as-is rather than re-encoded.
+    passed_through: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -137,25 +148,49 @@ async fn inspect_file(
 }
 
 /// Works out what would happen, without encoding anything — drives the
-/// "1080p → 720p, 1.4 Mbps" preview on each card.
+/// "1080p → 720p, 1.4 Mbps" preview on each card and the editor's live readout.
 #[tauri::command]
 async fn preview_plan(
     state: State<'_, AppState>,
     path: String,
     settings: Settings,
+    edits: Option<Edits>,
 ) -> Result<encode::Plan, String> {
     let input = PathBuf::from(&path);
     let info = ffmpeg::probe(&state.bins, &input)?;
-    encode::plan(&info, &settings, &state.bins)
+    encode::plan(&info, &settings, &edits.unwrap_or_default(), &state.bins)
+}
+
+/// Reads a pasted link without downloading anything.
+#[tauri::command]
+async fn inspect_url(app: AppHandle, url: String) -> Result<download::UrlInfo, String> {
+    if !download::looks_like_url(&url) {
+        return Err("That doesn't look like a link.".into());
+    }
+    let data_dir = app_data_dir(&app)?;
+    let bin = download::ensure(&data_dir, |_| {})?;
+    download::probe_url(&bin, &url)
 }
 
 #[tauri::command]
 async fn start_job(
     state: State<'_, AppState>,
     id: String,
-    path: String,
+    path: Option<String>,
+    url: Option<String>,
+    title: Option<String>,
     settings: Settings,
+    edits: Option<Edits>,
 ) -> Result<(), String> {
+    let source = match (path, url) {
+        (Some(p), _) => JobSource::File(PathBuf::from(p)),
+        (None, Some(u)) => JobSource::Url {
+            title: title.unwrap_or_else(|| download::site_name(&u)),
+            url: u,
+        },
+        _ => return Err("A job needs either a file or a link.".into()),
+    };
+
     let cancel = Arc::new(AtomicBool::new(false));
     state
         .cancels
@@ -167,11 +202,85 @@ async fn start_job(
         .queue
         .send(QueuedJob {
             id,
-            input: PathBuf::from(path),
+            source,
             settings,
+            edits: edits.unwrap_or_default(),
             cancel,
         })
         .map_err(|_| "The encoding queue has shut down.".to_string())
+}
+
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Couldn't find the app data folder: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Editor support
+// ---------------------------------------------------------------------------
+
+fn frame_data_url(bins: &Binaries, input: &Path, at: f64, cache: &Path) -> Option<String> {
+    std::fs::create_dir_all(cache).ok()?;
+    let out = cache.join(format!("frame-{}.jpg", (at * 1000.0) as u64));
+    ffmpeg::thumbnail(bins, input, &out, at).ok()?;
+    let bytes = std::fs::read(&out).ok()?;
+    let _ = std::fs::remove_file(&out);
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+/// A single frame, for the editor's preview when the webview can't play the
+/// file itself.
+#[tauri::command]
+async fn frame_at(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    time: f64,
+) -> Result<String, String> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("No cache folder: {e}"))?;
+    frame_data_url(&state.bins, &PathBuf::from(path), time.max(0.0), &cache)
+        .ok_or_else(|| "Couldn't read a frame from that video.".to_string())
+}
+
+/// Evenly spaced frames for the trim timeline.
+#[tauri::command]
+async fn filmstrip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    count: usize,
+) -> Result<Vec<String>, String> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("No cache folder: {e}"))?;
+    let input = PathBuf::from(path);
+    let info = ffmpeg::probe(&state.bins, &input)?;
+
+    let count = count.clamp(4, 24);
+    let mut frames = Vec::with_capacity(count);
+    for i in 0..count {
+        // Sample from the middle of each slice rather than its edge, so the
+        // first frame isn't the usual black fade-in.
+        let at = info.duration * ((i as f64 + 0.5) / count as f64);
+        match frame_data_url(&state.bins, &input, at, &cache) {
+            Some(url) => frames.push(url),
+            None => break,
+        }
+    }
+
+    if frames.is_empty() {
+        Err("Couldn't read frames from that video.".into())
+    } else {
+        Ok(frames)
+    }
 }
 
 #[tauri::command]
@@ -225,6 +334,13 @@ fn hide_window(app: AppHandle) {
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// The popup is deliberately small, which is wrong for dragging a crop
+/// rectangle. It grows while the editor is open and shrinks back afterwards.
+#[tauri::command]
+fn set_editor_size(app: AppHandle, expanded: bool) {
+    tray::resize_popup(&app, expanded);
 }
 
 /// Hands over any files named on the command line, clearing them so a later
@@ -309,13 +425,33 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
     let state = app.state::<AppState>();
     let QueuedJob {
         id,
-        input,
+        source,
         settings,
+        edits,
         cancel,
     } = job;
 
     let finish = |app: &AppHandle| {
         app.state::<AppState>().cancels.lock().unwrap().remove(&id);
+    };
+    let emit = |progress: f64, stage: &str| {
+        let _ = app.emit(
+            "job://progress",
+            ProgressEvent {
+                id: &id,
+                progress,
+                stage,
+            },
+        );
+    };
+    let fail = |app: &AppHandle, error: String| {
+        let _ = app.emit(
+            "job://failed",
+            FailedEvent {
+                id: id.clone(),
+                error,
+            },
+        );
     };
 
     if cancel.load(Ordering::Relaxed) {
@@ -324,57 +460,165 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
         return;
     }
 
-    let _ = app.emit(
-        "job://progress",
-        ProgressEvent {
-            id: &id,
-            progress: 0.0,
-            stage: "Preparing",
-        },
-    );
+    emit(0.0, "Preparing");
+
+    // A link has to become a local file before anything else can happen.
+    let from_url = matches!(source, JobSource::Url { .. });
+    let mut work_dir: Option<PathBuf> = None;
+
+    let (input, name_hint) = match source {
+        JobSource::File(path) => (path, None),
+        JobSource::Url { url, title } => {
+            let data_dir = match app_data_dir(app) {
+                Ok(d) => d,
+                Err(e) => {
+                    fail(app, e);
+                    finish(app);
+                    return;
+                }
+            };
+
+            let bin =
+                match download::ensure(&data_dir, |p| emit(p * 0.05, "Fetching the downloader")) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        fail(app, e);
+                        finish(app);
+                        return;
+                    }
+                };
+
+            let dir =
+                std::env::temp_dir().join(format!("nitrate-dl-{}-{}", std::process::id(), id));
+            work_dir = Some(dir.clone());
+
+            let fetched = download::fetch(
+                &bin,
+                &state.bins,
+                &url,
+                &dir,
+                settings.max_download_height,
+                &cancel,
+                |p| emit(0.05 + p * 0.40, "Downloading"),
+            );
+
+            match fetched {
+                Ok(Ok(path)) => (path, Some(title)),
+                Ok(Err(_cancelled)) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    let _ = app.emit("job://cancelled", CancelledEvent { id: id.clone() });
+                    finish(app);
+                    return;
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    fail(app, e);
+                    finish(app);
+                    return;
+                }
+            }
+        }
+    };
+
+    let cleanup = |work_dir: &Option<PathBuf>| {
+        if let Some(dir) = work_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    };
 
     let info = match ffmpeg::probe(&state.bins, &input) {
         Ok(i) => i,
         Err(e) => {
-            let _ = app.emit(
-                "job://failed",
-                FailedEvent {
-                    id: id.clone(),
-                    error: e,
-                },
-            );
+            cleanup(&work_dir);
+            fail(app, e);
             finish(app);
             return;
         }
     };
+
+    // Two ways to skip encoding: the file already fits, or it came from a link
+    // and the user asked to be left alone with it.
+    let already_fits = encode::can_pass_through(&info, &settings, &edits, &input);
+    let hold_download = from_url && !settings.auto_compress_downloads;
+
+    if already_fits || hold_download {
+        // A download lives in a temp folder, so it has to be moved somewhere
+        // real. A file the user already had stays exactly where it is.
+        let placed = if from_url {
+            match encode::place_untouched(&input, &settings, name_hint.as_deref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    cleanup(&work_dir);
+                    fail(app, e);
+                    finish(app);
+                    return;
+                }
+            }
+        } else {
+            input.clone()
+        };
+
+        cleanup(&work_dir);
+
+        let bytes = std::fs::metadata(&placed)
+            .map(|m| m.len())
+            .unwrap_or(info.size_bytes);
+
+        let note = if already_fits {
+            format!(
+                "Already under {} — left untouched.",
+                format_size(settings.target_bytes)
+            )
+        } else {
+            "Downloaded. Compress it from the editor when you're ready.".into()
+        };
+
+        emit(1.0, "Done");
+        let _ = app.emit(
+            "job://done",
+            DoneEvent {
+                id: id.clone(),
+                output: placed.to_string_lossy().into_owned(),
+                final_bytes: bytes,
+                original_bytes: info.size_bytes,
+                attempts: 0,
+                notes: vec![note],
+                width: info.width,
+                height: info.height,
+                passed_through: true,
+            },
+        );
+        finish(app);
+        return;
+    }
+
+    // Downloading already used the first stretch of the bar, so encoding gets
+    // what's left rather than starting over from zero.
+    let (base, span) = if from_url { (0.45, 0.55) } else { (0.0, 1.0) };
 
     // ffmpeg reports progress several times a second; the UI doesn't need
     // anything like that many repaints.
     let mut last_emit = Instant::now() - Duration::from_secs(1);
     let mut last_stage = String::new();
 
-    let result = encode::run_job(
-        &state.bins,
-        &input,
-        &settings,
-        &info,
-        &cancel,
-        |progress, stage| {
-            let stage_changed = stage != last_stage;
-            if stage_changed || last_emit.elapsed() >= Duration::from_millis(80) {
-                last_emit = Instant::now();
-                last_stage = stage.to_string();
-                let _ = app.emit(
-                    "job://progress",
-                    ProgressEvent {
-                        id: &id,
-                        progress,
-                        stage,
-                    },
-                );
-            }
-        },
-    );
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &settings,
+        edits: &edits,
+        name_hint: name_hint.as_deref(),
+    };
+
+    let result = encode::run_job(&state.bins, &task, &cancel, |progress, stage| {
+        let stage_changed = stage != last_stage;
+        if stage_changed || last_emit.elapsed() >= Duration::from_millis(80) {
+            last_emit = Instant::now();
+            last_stage = stage.to_string();
+            emit(base + progress * span, stage);
+        }
+    });
+
+    cleanup(&work_dir);
 
     match result {
         Ok(Ok(outcome)) => {
@@ -389,6 +633,7 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
                     notes: outcome.plan.notes,
                     width: outcome.plan.width,
                     height: outcome.plan.height,
+                    passed_through: false,
                 },
             );
         }
@@ -396,13 +641,7 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
             let _ = app.emit("job://cancelled", CancelledEvent { id: id.clone() });
         }
         Err(error) => {
-            let _ = app.emit(
-                "job://failed",
-                FailedEvent {
-                    id: id.clone(),
-                    error,
-                },
-            );
+            fail(app, error);
         }
     }
 
@@ -467,6 +706,10 @@ pub fn run() {
             quit_app,
             take_pending_files,
             frontend_ready,
+            inspect_url,
+            frame_at,
+            filmstrip,
+            set_editor_size,
         ])
         .setup(move |app| {
             tray::setup(app.handle(), Arc::clone(&suppress_hide))?;
@@ -478,6 +721,13 @@ pub fn run() {
                 .map(|n| (n.get() / 4).clamp(1, 3))
                 .unwrap_or(1);
             spawn_workers(app.handle().clone(), rx, workers);
+
+            // Sites change constantly, so a downloader left alone goes stale.
+            // Off the main thread and silent about failure — there's nobody to
+            // tell at startup, and a slightly old copy still works for most.
+            if let Ok(data_dir) = app_data_dir(app.handle()) {
+                std::thread::spawn(move || download::refresh_if_stale(&data_dir));
+            }
 
             // Whether the window appears at startup is decided in
             // `frontend_ready`, once there's actually something to show.

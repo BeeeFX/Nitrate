@@ -105,6 +105,12 @@ pub struct Settings {
     pub preset: String,
     pub two_pass: bool,
     pub output_dir: Option<String>,
+    /// When off, a pasted link is downloaded and then left alone, ready to be
+    /// edited and compressed by hand.
+    pub auto_compress_downloads: bool,
+    /// Ceiling on what to fetch from a link. Pulling 4K only to squeeze it into
+    /// ten megabytes wastes bandwidth and time for no gain.
+    pub max_download_height: u32,
 }
 
 impl Default for Settings {
@@ -122,8 +128,77 @@ impl Default for Settings {
             preset: "medium".into(),
             two_pass: true,
             output_dir: None,
+            auto_compress_downloads: true,
+            max_download_height: 1080,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Edits
+// ---------------------------------------------------------------------------
+
+/// A crop, stored as fractions of the source rather than pixels so the editor
+/// can work against a preview of any size without having to know the real
+/// resolution.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CropRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Edits {
+    pub start: Option<f64>,
+    pub end: Option<f64>,
+    pub crop: Option<CropRect>,
+}
+
+impl Edits {
+    pub fn is_empty(&self) -> bool {
+        self.start.is_none() && self.end.is_none() && self.crop.is_none()
+    }
+
+    pub fn start_at(&self, full: f64) -> f64 {
+        self.start.unwrap_or(0.0).clamp(0.0, full)
+    }
+
+    /// How much video actually gets encoded — and therefore what the bitrate
+    /// budget is spread across. Trimming is the cheapest way to buy quality.
+    pub fn duration(&self, full: f64) -> f64 {
+        let start = self.start_at(full);
+        let end = self.end.unwrap_or(full).clamp(start, full);
+        (end - start).max(0.1)
+    }
+
+    /// Source dimensions after cropping, rounded to even numbers because
+    /// every codec here demands it.
+    pub fn dimensions(&self, width: u32, height: u32) -> (u32, u32) {
+        match self.crop {
+            Some(c) => (
+                even(width as f64 * c.width.clamp(0.01, 1.0)),
+                even(height as f64 * c.height.clamp(0.01, 1.0)),
+            ),
+            None => (width, height),
+        }
+    }
+
+    /// The crop in pixels, ready for ffmpeg's filter.
+    fn crop_filter(&self, width: u32, height: u32) -> Option<String> {
+        let c = self.crop?;
+        let (w, h) = self.dimensions(width, height);
+        let x = even(width as f64 * c.x.clamp(0.0, 1.0)).min(width.saturating_sub(w));
+        let y = even(height as f64 * c.y.clamp(0.0, 1.0)).min(height.saturating_sub(h));
+        Some(format!("crop={w}:{h}:{x}:{y}"))
+    }
+}
+
+fn even(value: f64) -> u32 {
+    ((value.round() as u32).max(2)) & !1
 }
 
 // ---------------------------------------------------------------------------
@@ -149,12 +224,24 @@ const LADDER: &[u32] = &[2160, 1440, 1080, 900, 720, 540, 480, 360, 270, 180];
 /// Below this, video stops being worth encoding at all.
 const MIN_VIDEO_KBPS: f64 = 48.0;
 
-pub fn plan(info: &MediaInfo, settings: &Settings, bins: &Binaries) -> Result<Plan, String> {
+pub fn plan(
+    info: &MediaInfo,
+    settings: &Settings,
+    edits: &Edits,
+    bins: &Binaries,
+) -> Result<Plan, String> {
     let mut notes = Vec::new();
+
+    // Everything downstream works from the *edited* clip: trimming shortens the
+    // duration the budget is spread over, and cropping shrinks the frame that
+    // has to be filled. Both buy quality, so they have to feed the maths rather
+    // than be applied as an afterthought.
+    let duration = edits.duration(info.duration);
+    let (source_width, source_height) = edits.dimensions(info.width, info.height);
 
     let margin = settings.safety_margin.clamp(0.5, 0.999);
     let usable_bits = settings.target_bytes as f64 * 8.0 * margin;
-    let total_kbps = usable_bits / 1000.0 / info.duration;
+    let total_kbps = usable_bits / 1000.0 / duration;
 
     // Audio comes off the top — it's effectively fixed cost.
     let mut audio_kbps = match settings.audio_codec {
@@ -189,9 +276,9 @@ pub fn plan(info: &MediaInfo, settings: &Settings, bins: &Binaries) -> Result<Pl
 
     if video_kbps < MIN_VIDEO_KBPS {
         return Err(format!(
-            "{} is too small for a {} video — even at minimum quality it won't fit. Try a larger target or trim the clip.",
+            "{} is too small for a {} video — even at minimum quality it won't fit. Trim it shorter, or pick a larger target.",
             crate::format_size(settings.target_bytes),
-            format_duration(info.duration)
+            format_duration(duration)
         ));
     }
 
@@ -205,7 +292,7 @@ pub fn plan(info: &MediaInfo, settings: &Settings, bins: &Binaries) -> Result<Pl
     }
 
     // Then pick the largest resolution the bitrate can actually carry.
-    let source_height = info.height.max(1);
+    let source_height = source_height.max(1);
     let mut height = settings
         .max_height
         .unwrap_or(source_height)
@@ -213,7 +300,7 @@ pub fn plan(info: &MediaInfo, settings: &Settings, bins: &Binaries) -> Result<Pl
     let min_bpp = settings.video_codec.min_bpp();
 
     let bpp_at = |h: u32, fps: f64| -> f64 {
-        let w = scaled_width(info, h) as f64;
+        let w = scaled_width(source_width, source_height, h) as f64;
         (video_kbps * 1000.0) / (w * h as f64 * fps)
     };
 
@@ -239,7 +326,7 @@ pub fn plan(info: &MediaInfo, settings: &Settings, bins: &Binaries) -> Result<Pl
         }
     }
 
-    let width = scaled_width(info, height);
+    let width = scaled_width(source_width, source_height, height);
 
     // Pick the actual encoder, falling back to software if the GPU can't help.
     let mut encoder = settings.video_codec.software().to_string();
@@ -278,13 +365,12 @@ pub fn plan(info: &MediaInfo, settings: &Settings, bins: &Binaries) -> Result<Pl
 }
 
 /// Keeps the aspect ratio and forces an even width, which every codec requires.
-fn scaled_width(info: &MediaInfo, height: u32) -> u32 {
-    if info.height == 0 || info.width == 0 {
+fn scaled_width(source_width: u32, source_height: u32, height: u32) -> u32 {
+    if source_height == 0 || source_width == 0 {
         return 0;
     }
-    let ratio = info.width as f64 / info.height as f64;
-    let w = (height as f64 * ratio).round() as u32;
-    w.max(2) & !1
+    let ratio = source_width as f64 / source_height as f64;
+    even(height as f64 * ratio)
 }
 
 fn format_duration(secs: f64) -> String {
@@ -302,6 +388,18 @@ fn format_duration(secs: f64) -> String {
 // ---------------------------------------------------------------------------
 // Command construction
 // ---------------------------------------------------------------------------
+
+/// Everything describing *what* to produce, bundled so it can be threaded
+/// through planning, argument building and the retry loop as one thing.
+pub struct Task<'a> {
+    pub input: &'a Path,
+    pub info: &'a MediaInfo,
+    pub settings: &'a Settings,
+    pub edits: &'a Edits,
+    /// Preferred output filename, used when the input is a temp download whose
+    /// own name means nothing.
+    pub name_hint: Option<&'a str>,
+}
 
 fn s(v: &str) -> String {
     v.to_string()
@@ -342,19 +440,47 @@ fn numeric_preset(preset: &str, min: u32, max: u32, fallback: u32) -> String {
 ///
 /// `pass` is `None` for a single-pass encode, or `Some(1 | 2)` for two-pass.
 fn build_args(
-    input: &Path,
+    task: &Task,
     output: &Path,
     plan: &Plan,
-    settings: &Settings,
-    info: &MediaInfo,
     pass: Option<u8>,
     passlog: &Path,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec![s("-y"), s("-i"), input.to_string_lossy().into_owned()];
+    let Task {
+        input,
+        info,
+        settings,
+        edits,
+        ..
+    } = task;
 
-    // Only build a filter chain if something actually changes.
+    let mut args: Vec<String> = vec![s("-y")];
+
+    // Seeking before -i is the fast path, and modern ffmpeg still lands on the
+    // right frame because it decodes forward from the preceding keyframe.
+    let start = edits.start_at(info.duration);
+    if start > 0.0 {
+        args.push(s("-ss"));
+        args.push(format!("{start:.3}"));
+    }
+
+    args.push(s("-i"));
+    args.push(input.to_string_lossy().into_owned());
+
+    if !edits.is_empty() {
+        // Duration rather than an end timestamp, since -ss already shifted the
+        // origin and -to would be measured against the original timeline.
+        args.push(s("-t"));
+        args.push(format!("{:.3}", edits.duration(info.duration)));
+    }
+
+    // Crop first: everything after it works on the smaller frame.
+    let (cropped_width, cropped_height) = edits.dimensions(info.width, info.height);
     let mut filters: Vec<String> = Vec::new();
-    if plan.height != info.height {
+    if let Some(crop) = edits.crop_filter(info.width, info.height) {
+        filters.push(crop);
+    }
+    if plan.height != cropped_height || plan.width != cropped_width {
         filters.push(format!("scale=-2:{}:flags=lanczos", plan.height));
     }
     if (plan.fps - info.fps).abs() > 0.01 {
@@ -522,14 +648,24 @@ static PASSLOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn run_job(
     bins: &Binaries,
-    input: &Path,
-    settings: &Settings,
-    info: &MediaInfo,
+    task: &Task,
     cancel: &Arc<AtomicBool>,
     mut on_progress: impl FnMut(f64, &str),
 ) -> Result<Result<EncodeOutcome, Cancelled>, String> {
-    let mut plan = plan(info, settings, bins)?;
-    let output = output_path(input, settings)?;
+    let Task {
+        input,
+        info,
+        settings,
+        edits,
+        name_hint,
+    } = task;
+
+    let mut plan = plan(info, settings, edits, bins)?;
+    let output = output_path(input, settings, *name_hint)?;
+
+    // Progress is measured against what actually gets written, which after a
+    // trim is shorter than the source.
+    let encoded_duration = edits.duration(info.duration);
 
     // Pass logs are noisy temp files; keep them out of the user's folders.
     //
@@ -554,13 +690,13 @@ pub fn run_job(
         attempts += 1;
 
         if two_pass {
-            let args = build_args(input, &output, &plan, settings, info, Some(1), &passlog);
+            let args = build_args(task, &output, &plan, Some(1), &passlog);
             let stage = if attempts > 1 {
                 "Analysing (retry)"
             } else {
                 "Analysing"
             };
-            match ffmpeg::run(bins, &args, info.duration, cancel, |p| {
+            match ffmpeg::run(bins, &args, encoded_duration, cancel, |p| {
                 on_progress(p * 0.35, stage)
             })? {
                 Ok(()) => {}
@@ -570,8 +706,8 @@ pub fn run_job(
                 }
             }
 
-            let args = build_args(input, &output, &plan, settings, info, Some(2), &passlog);
-            match ffmpeg::run(bins, &args, info.duration, cancel, |p| {
+            let args = build_args(task, &output, &plan, Some(2), &passlog);
+            match ffmpeg::run(bins, &args, encoded_duration, cancel, |p| {
                 on_progress(0.35 + p * 0.65, "Encoding")
             })? {
                 Ok(()) => {}
@@ -581,8 +717,8 @@ pub fn run_job(
                 }
             }
         } else {
-            let args = build_args(input, &output, &plan, settings, info, None, &passlog);
-            match ffmpeg::run(bins, &args, info.duration, cancel, |p| {
+            let args = build_args(task, &output, &plan, None, &passlog);
+            match ffmpeg::run(bins, &args, encoded_duration, cancel, |p| {
                 on_progress(p, "Encoding")
             })? {
                 Ok(()) => {}
@@ -629,19 +765,134 @@ pub fn run_job(
     }))
 }
 
-/// Picks a destination that won't clobber anything the user already has.
-fn output_path(input: &Path, settings: &Settings) -> Result<PathBuf, String> {
+/// Whether this file can simply be handed over untouched.
+///
+/// Re-encoding something that already fits only throws quality away, so the
+/// honest answer to "make this 10 MB" for an 8 MB clip is to do nothing. The
+/// container still has to be one Discord previews inline, otherwise "it fits"
+/// would be technically true and practically useless.
+pub fn can_pass_through(
+    info: &MediaInfo,
+    settings: &Settings,
+    edits: &Edits,
+    input: &Path,
+) -> bool {
+    if !edits.is_empty() {
+        return false;
+    }
+    if info.size_bytes == 0 || info.size_bytes > settings.target_bytes {
+        return false;
+    }
+
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "webm")
+}
+
+/// Strips anything Windows or the user would object to in a filename.
+///
+/// Video titles arrive from the internet, so this has to cope with path
+/// separators, control characters, and names that are simply enormous.
+pub fn safe_stem(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+
+    let clipped: String = cleaned
+        .trim()
+        .trim_matches('.')
+        .trim()
+        .chars()
+        .take(80)
+        .collect();
+    let result = clipped.trim().to_string();
+
+    if result.is_empty() {
+        "video".into()
+    } else {
+        result
+    }
+}
+
+/// Where finished files land.
+pub fn output_dir(settings: &Settings) -> Result<PathBuf, String> {
     let dir = match &settings.output_dir {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => dirs_downloads().ok_or("Couldn't find your Downloads folder.")?,
     };
-
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the output folder: {e}"))?;
+    Ok(dir)
+}
 
-    let stem = input
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "video".into());
+/// Moves a file that needs no re-encoding into the output folder, keeping the
+/// extension it already has rather than the one the settings ask for.
+pub fn place_untouched(
+    source: &Path,
+    settings: &Settings,
+    name_hint: Option<&str>,
+) -> Result<PathBuf, String> {
+    let dir = output_dir(settings)?;
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4")
+        .to_lowercase();
+
+    let stem = match name_hint {
+        Some(hint) => safe_stem(hint),
+        None => source
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "video".into()),
+    };
+
+    let mut candidate = dir.join(format!("{stem}.{ext}"));
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{stem}-{n}.{ext}"));
+        n += 1;
+        if n > 999 {
+            return Err("Too many files with that name already.".into());
+        }
+    }
+
+    // Rename first — it's instant when both sides are on the same volume, which
+    // they usually aren't for a temp download, hence the copy fallback.
+    if std::fs::rename(source, &candidate).is_err() {
+        std::fs::copy(source, &candidate)
+            .map_err(|e| format!("Couldn't move the file into place: {e}"))?;
+        let _ = std::fs::remove_file(source);
+    }
+
+    Ok(candidate)
+}
+
+/// Picks a destination that won't clobber anything the user already has.
+fn output_path(
+    input: &Path,
+    settings: &Settings,
+    name_hint: Option<&str>,
+) -> Result<PathBuf, String> {
+    let dir = output_dir(settings)?;
+
+    let stem = match name_hint {
+        // Downloads land in a temp folder under a fixed name, so the title from
+        // the site is the only meaningful thing to call the result.
+        Some(hint) => safe_stem(hint),
+        None => input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "video".into()),
+    };
     let ext = settings.container.extension();
 
     let mut candidate = dir.join(format!("{stem}-nitrate.{ext}"));

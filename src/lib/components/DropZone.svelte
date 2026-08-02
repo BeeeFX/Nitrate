@@ -55,10 +55,13 @@
 
   <div class="text">
     <span class="head">
-      {hovering ? "Release to compress" : "Drop videos here"}
+      {hovering ? "Release to compress" : "Drop videos or paste a link"}
     </span>
     {#if !compact}
-      <span class="sub">or click to browse — multiple files welcome</span>
+      <span class="sub">
+        Click to browse, or press Ctrl+V with a link copied
+      </span>
+      <span class="sites">YouTube · X · Instagram · Reddit · Twitch</span>
     {/if}
   </div>
 </button>
@@ -175,5 +178,12 @@
   .sub {
     font-size: 11px;
     color: var(--text-faint);
+  }
+
+  .sites {
+    margin-top: 4px;
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    color: rgba(155, 160, 180, 0.55);
   }
 </style>

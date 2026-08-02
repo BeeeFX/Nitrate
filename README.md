@@ -9,8 +9,9 @@
 
 **Discord won't take your video? Drop it here.**
 
-Nitrate lives in your system tray. Click the icon, drop in a video, and it comes
-back in your Downloads folder small enough to send — without paying for Nitro.
+Nitrate lives in your system tray. Click the icon, drop in a video — or paste a
+link — and it comes back in your Downloads folder small enough to send, without
+paying for Nitro.
 
 [**Download for Windows**](https://github.com/BeeeFX/Nitrate/releases/latest) · [How it works](#how-it-hits-an-exact-size) · [Build from source](#building-from-source)
 
@@ -41,17 +42,51 @@ back in your Downloads folder small enough to send — without paying for Nitro.
 
 - **Drop as many videos as you like.** Each gets its own thumbnail, progress bar
   and time remaining. Compression runs in the background while you carry on.
+- **Paste a link instead.** Press <kbd>Ctrl</kbd>+<kbd>V</kbd> with a YouTube, X,
+  Instagram, Reddit or Twitch URL copied and it downloads, then compresses. No
+  URL box to find — the drop zone already is the place things go.
 - **It actually hits the target.** A 10 MB limit produces a ~9.7 MB file — not an
   11 MB one that Discord bounces.
 - **It protects the picture.** Rather than smearing a long 4K clip into an
   unwatchable 10 MB, it steps the resolution and frame rate down until the
   bitrate is genuinely enough, and tells you what it did.
+- **It won't touch what already fits.** A file under the limit is left exactly as
+  it is, because re-encoding it could only make it worse.
 - **Nothing is uploaded.** Every frame is encoded on your own machine.
 - **It gets out of the way.** Files land in Downloads. Close the window and it
   waits in the tray.
 
 Also handles **"Open with Nitrate"** — right-click any video, or drop one onto
 the shortcut, and it starts straight away.
+
+## Crop and trim
+
+<table>
+<tr>
+<td width="55%" valign="top">
+<img src="docs/screenshot-editor.png" alt="The editor: a video frame with a square crop rectangle over it, aspect ratio buttons, a filmstrip timeline, and a readout reading 1080x1080 at 2.4 Mbps" width="100%">
+</td>
+<td valign="top">
+
+The scissors button on any card opens an editor. The window grows to make room
+and shrinks back when you leave, so the tray popup stays small the rest of the
+time.
+
+Drag a crop rectangle — freeform or locked to 16:9, 1:1, 9:16 or 4:5 — and drag
+the handles on the filmstrip to set where the clip starts and ends.
+
+**The readout updates as you drag, and that's the point.** Trimming and cropping
+both feed straight back into the bitrate budget: cut a ten-minute clip to thirty
+seconds and the same 10 MB buys roughly twenty times the bitrate. In the
+screenshot, cropping to a square is what let this clip keep its full 1080 lines
+instead of dropping to 900p — the readout turns from amber to green when that
+happens.
+
+So the editor isn't a separate tool bolted on. It's a quality dial.
+
+</td>
+</tr>
+</table>
 
 ## Install
 
@@ -130,6 +165,7 @@ Sensible defaults, with everything exposed if you want it:
 | **Hardware encoding** | Uses your GPU. Far faster, less precise |
 | **Safety margin** | How much headroom to leave |
 | **Output folder** | Downloads by default |
+| **Pasted links** | Compress automatically, and what quality to fetch |
 | **Start with the computer** | Launch to the tray at sign-in |
 
 Encoder speed options follow the codec you pick, because they don't share a
@@ -207,7 +243,9 @@ draft.
 ## Licence
 
 Nitrate's own source is MIT. Released binaries bundle GPL v3 ffmpeg builds, which
-carries obligations if you redistribute them — see
+carries obligations if you redistribute them. Pasting a link fetches
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) on demand — public domain, and not
+bundled, because it needs to stay current to keep working. See
 [THIRD-PARTY.md](THIRD-PARTY.md).
 
 Not affiliated with Discord. "Discord" and "Nitro" are trademarks of Discord Inc.

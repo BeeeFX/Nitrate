@@ -44,6 +44,37 @@ export interface Settings {
   preset: string;
   twoPass: boolean;
   outputDir: string | null;
+  autoCompressDownloads: boolean;
+  maxDownloadHeight: number;
+}
+
+/** Fractions of the source frame, so the editor needn't know the real size. */
+export interface CropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface Edits {
+  start: number | null;
+  end: number | null;
+  crop: CropRect | null;
+}
+
+export interface UrlInfo {
+  title: string;
+  duration: number | null;
+  site: string;
+  webpageUrl: string;
+}
+
+export function emptyEdits(): Edits {
+  return { start: null, end: null, crop: null };
+}
+
+export function hasEdits(edits: Edits): boolean {
+  return edits.start !== null || edits.end !== null || edits.crop !== null;
 }
 
 export type JobStatus =
@@ -55,6 +86,10 @@ export type JobStatus =
 
 export interface Job {
   id: string;
+  /** A link has no local file until it's been fetched. */
+  kind: "file" | "url";
+  url: string | null;
+  /** Empty until a link has been resolved or a file probed. */
   path: string;
   name: string;
   info: MediaInfo | null;
@@ -69,6 +104,9 @@ export interface Job {
   error: string | null;
   notes: string[];
   startedAt: number | null;
+  edits: Edits;
+  /** Finished without re-encoding, because it already fitted. */
+  passedThrough: boolean;
 }
 
 export interface Capabilities {

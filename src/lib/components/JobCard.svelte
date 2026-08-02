@@ -8,7 +8,7 @@
     truncateName,
   } from "../format";
   import { app, etaFor } from "../state.svelte";
-  import type { Job } from "../types";
+  import { hasEdits, type Job } from "../types";
 
   interface Props {
     job: Job;
@@ -38,6 +38,11 @@
   );
 
   let percent = $derived(Math.round(job.progress * 100));
+
+  let idle = $derived(job.status !== "running" && job.status !== "queued");
+  // A link has no local file to edit until it has been fetched.
+  let editable = $derived(idle && job.path !== "");
+  let edited = $derived(hasEdits(job.edits));
 </script>
 
 <article class="card" class:done={job.status === "done"} class:failed={job.status === "failed"}>
@@ -71,7 +76,19 @@
     </div>
 
     <div class="info">
-      <div class="name" title={job.name}>{truncateName(job.name)}</div>
+      <div class="name" title={job.name}>
+        {truncateName(job.name)}
+        {#if edited}
+          <span class="edits">
+            {#if job.edits.start !== null || job.edits.end !== null}
+              <span class="tag">✂ {formatDuration(
+                (job.edits.end ?? job.info?.duration ?? 0) - (job.edits.start ?? 0),
+              )}</span>
+            {/if}
+            {#if job.edits.crop}<span class="tag">crop</span>{/if}
+          </span>
+        {/if}
+      </div>
 
       <div class="meta tnum">
         {#if job.status === "failed"}
@@ -143,6 +160,31 @@
               stroke-linejoin="round"
             /></svg
           >
+        </button>
+      {/if}
+
+      {#if editable}
+        <button
+          class="act"
+          class:on={edited}
+          onclick={() => app.openEditor(job.id)}
+          title="Crop and trim"
+        >
+          <!-- Plain scissors: two rings and crossed blades. Anything more
+               detailed turns to mush at 14px. -->
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+          >
+            <circle cx="6.5" cy="6.5" r="2.6" />
+            <circle cx="6.5" cy="17.5" r="2.6" />
+            <path d="M20 4 8.7 15.3" />
+            <path d="M13.8 14 20 20" />
+            <path d="M8.7 8.7 11.5 11.5" />
+          </svg>
         </button>
       {/if}
 
@@ -279,11 +321,34 @@
   }
 
   .name {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
     font-size: 12.5px;
     font-weight: 600;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .edits {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .tag {
+    padding: 1px 5px;
+    border-radius: 5px;
+    font-size: 9.5px;
+    font-weight: 700;
+    color: var(--blurple-bright);
+    background: rgba(88, 101, 242, 0.16);
+  }
+
+  .act.on {
+    color: var(--blurple-bright);
+    background: rgba(88, 101, 242, 0.16);
   }
 
   .meta {

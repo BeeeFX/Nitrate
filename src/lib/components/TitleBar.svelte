@@ -59,11 +59,22 @@
       aria-label="Advanced settings"
       aria-pressed={settingsOpen}
     >
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path
-          d="M12 15.5a3.5 3.5 0 110-7 3.5 3.5 0 010 7zm8.4-2.2l1.9 1.5-1.9 3.3-2.3-.8a7.6 7.6 0 01-1.8 1l-.4 2.4h-3.8l-.4-2.4a7.6 7.6 0 01-1.8-1l-2.3.8-1.9-3.3 1.9-1.5a7.7 7.7 0 010-2.1L1.7 9.7l1.9-3.3 2.3.8a7.6 7.6 0 011.8-1L8.1 3.8h3.8l.4 2.4c.64.26 1.24.6 1.8 1l2.3-.8 1.9 3.3-1.9 1.5c.07.7.07 1.4 0 2.1z"
-          fill="currentColor"
-        />
+      <!-- Sliders rather than a gear: it survives 15px, and "parameters" is
+           what the panel behind it actually is. -->
+      <svg
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+      >
+        <path d="M3 8h5" />
+        <path d="M13 8h8" />
+        <path d="M3 16h11" />
+        <path d="M19 16h2" />
+        <circle cx="10.5" cy="8" r="2.5" fill="currentColor" stroke="none" />
+        <circle cx="16.5" cy="16" r="2.5" fill="currentColor" stroke="none" />
       </svg>
     </button>
 

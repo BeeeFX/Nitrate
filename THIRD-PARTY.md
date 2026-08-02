@@ -35,6 +35,21 @@ If you need a permissively-licensed build, swap the download URLs in
 AV1 and Opus. You lose H.264 and H.265 — which for a Discord-focused tool is a
 significant loss, since H.264 is what plays inline everywhere.
 
+## yt-dlp — Unlicense (public domain)
+
+Pasting a link uses [yt-dlp](https://github.com/yt-dlp/yt-dlp), which is released
+into the public domain. It carries no licensing obligations, and unlike ffmpeg it
+is **not** bundled — it's fetched into your app data folder the first time you
+paste a link, and refreshed weekly.
+
+That's deliberate. Sites change their players constantly and yt-dlp ships
+frequent releases to keep up; a copy frozen at Nitrate's release date would stop
+working within weeks. Since a link can only be fetched online anyway, downloading
+the tool on demand costs nothing.
+
+yt-dlp refuses DRM-protected content, and downloading from some sites is against
+their terms of service — that's between you and the site.
+
 ## Others
 
 | Component | License |

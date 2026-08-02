@@ -146,7 +146,25 @@ export const DEFAULT_SETTINGS: Settings = {
   preset: "medium",
   twoPass: true,
   outputDir: null,
+  autoCompressDownloads: true,
+  maxDownloadHeight: 1080,
 };
+
+export const DOWNLOAD_HEIGHTS = [
+  { value: 2160, label: "4K" },
+  { value: 1440, label: "1440p" },
+  { value: 1080, label: "1080p" },
+  { value: 720, label: "720p" },
+];
+
+/** Aspect presets for the crop tool, as width ÷ height. `null` is freeform. */
+export const ASPECTS: { id: string; label: string; ratio: number | null }[] = [
+  { id: "free", label: "Free", ratio: null },
+  { id: "16:9", label: "16:9", ratio: 16 / 9 },
+  { id: "1:1", label: "1:1", ratio: 1 },
+  { id: "9:16", label: "9:16", ratio: 9 / 16 },
+  { id: "4:5", label: "4:5", ratio: 4 / 5 },
+];
 
 export const RESOLUTION_CAPS = [
   { value: null, label: "Auto" },

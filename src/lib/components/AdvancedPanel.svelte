@@ -4,6 +4,7 @@
     AUDIO_BITRATES,
     AUDIO_CODECS,
     CONTAINERS,
+    DOWNLOAD_HEIGHTS,
     FPS_CAPS,
     RESOLUTION_CAPS,
     VIDEO_CODECS,
@@ -231,6 +232,44 @@
           }}
         />
       </label>
+    </div>
+
+    <!-- Links -->
+    <div class="group">
+      <div class="group-label">Pasted links</div>
+
+      <label class="toggle-row">
+        <span class="toggle-text">
+          <span class="row-label">Compress automatically</span>
+          <span class="sub">
+            Off keeps the download as it arrived, ready to crop, trim and
+            compress by hand.
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={s.autoCompressDownloads}
+          onchange={(e) =>
+            app.update({ autoCompressDownloads: e.currentTarget.checked })}
+        />
+      </label>
+
+      <div class="row">
+        <span class="row-label">Download quality</span>
+        <select
+          value={String(s.maxDownloadHeight)}
+          onchange={(e) =>
+            app.update({ maxDownloadHeight: Number(e.currentTarget.value) })}
+        >
+          {#each DOWNLOAD_HEIGHTS as h (h.value)}
+            <option value={String(h.value)}>{h.label}</option>
+          {/each}
+        </select>
+      </div>
+      <p class="hint">
+        The ceiling on what gets fetched. Pulling 4K only to squeeze it into a
+        few megabytes wastes time and bandwidth.
+      </p>
     </div>
 
     <!-- Behaviour -->

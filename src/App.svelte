@@ -4,6 +4,7 @@
   import { onMount } from "svelte";
   import AdvancedPanel from "./lib/components/AdvancedPanel.svelte";
   import DropZone from "./lib/components/DropZone.svelte";
+  import Editor from "./lib/components/Editor.svelte";
   import JobCard from "./lib/components/JobCard.svelte";
   import TargetPicker from "./lib/components/TargetPicker.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
@@ -47,6 +48,20 @@
 
     const shown = listen("popup://shown", () => playEntrance());
 
+    // Pasting a link is the whole "add from the internet" interface — there's
+    // no URL box, because the drop zone already is the place things go.
+    const onPaste = (event: ClipboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+
+      const text = event.clipboardData?.getData("text")?.trim();
+      if (!text || !/^https?:\/\/\S+$/i.test(text)) return;
+
+      event.preventDefault();
+      void app.addUrl(text);
+    };
+    document.addEventListener("paste", onPaste);
+
     // Tauri's own drag-drop gives real filesystem paths, which the HTML5
     // drop event can't provide inside a webview.
     const pending = getCurrentWebview().onDragDropEvent((event) => {
@@ -62,6 +77,7 @@
 
     return () => {
       updater.stop();
+      document.removeEventListener("paste", onPaste);
       void pending.then((unlisten) => unlisten());
       void shown.then((unlisten) => unlisten());
     };
@@ -75,12 +91,19 @@
 
   <UpdateBanner />
 
-  {#if !settingsOpen}
+  {#if !settingsOpen && !app.editing}
     <TargetPicker />
   {/if}
 
   <section class="content">
-    {#if settingsOpen}
+    {#if app.editing}
+      {@const editing = app.editing}
+      <!-- Keyed so switching jobs rebuilds the editor rather than leaving the
+           previous clip's crop and trim in place. -->
+      {#key editing.id}
+        <Editor job={editing} />
+      {/key}
+    {:else if settingsOpen}
       <AdvancedPanel />
     {:else}
       <div class="body" class:padded={hasJobs}>
@@ -97,7 +120,7 @@
     {/if}
   </section>
 
-  {#if hasJobs && !settingsOpen}
+  {#if hasJobs && !settingsOpen && !app.editing}
     <footer class="footer">
       <span class="summary tnum">
         {#if app.busy}
