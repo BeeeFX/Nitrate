@@ -39,10 +39,15 @@
 
   let percent = $derived(Math.round(job.progress * 100));
 
-  let idle = $derived(job.status !== "running" && job.status !== "queued");
+  let working = $derived(job.status === "running" || job.status === "queued");
+  let idle = $derived(!working);
   // A link has no local file to edit until it has been fetched.
   let editable = $derived(idle && job.path !== "");
   let edited = $derived(hasEdits(job.edits));
+
+  // Held back rather than started automatically, because it's very long.
+  let waiting = $derived(job.status === "held");
+  let settings = $derived(app.settingsFor(job));
 </script>
 
 <article class="card" class:done={job.status === "done"} class:failed={job.status === "failed"}>
@@ -108,7 +113,13 @@
               {job.plan.height}p
             </span>
             <span class="dot">·</span>
-            <span>{formatBitrate(job.plan.videoKbps)}</span>
+            {#if job.plan.mode === "quality"}
+              <!-- No bitrate budget exists in quality mode, so quoting one
+                   would just be a misleading zero. -->
+              <span>{settings.quality} quality</span>
+            {:else}
+              <span>{formatBitrate(job.plan.videoKbps)}</span>
+            {/if}
           {/if}
         {:else}
           <span class="dim">{job.stage}</span>
@@ -117,7 +128,11 @@
     </div>
 
     <div class="actions">
-      {#if job.status === "running" || job.status === "queued"}
+      {#if waiting}
+        <button class="act go" onclick={() => app.start(job.id)} title="Compress it anyway">
+          <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor" /></svg>
+        </button>
+      {:else if working}
         <button class="act" onclick={() => app.cancel(job.id)} title="Cancel">
           <svg viewBox="0 0 24 24"
             ><path
@@ -203,7 +218,25 @@
     </div>
   </div>
 
-  {#if job.status === "running" || job.status === "queued"}
+  {#if waiting}
+    <p class="hold">
+      <svg viewBox="0 0 24 24" aria-hidden="true"
+        ><path
+          d="M12 9v5M12 17.5v.01M10.3 4.3 2.5 18a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0z"
+          stroke="currentColor"
+          stroke-width="1.8"
+          fill="none"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        /></svg
+      >
+      <span>
+        {formatDuration(job.knownDuration ?? 0)} long — squeezing all of it into
+        {formatSize(settings.targetBytes)} would look poor. Trim a section first,
+        pick <strong>No limit</strong>, or start it anyway.
+      </span>
+    </p>
+  {:else if working}
     <div class="progress">
       <div class="track">
         <div
@@ -349,6 +382,37 @@
   .act.on {
     color: var(--blurple-bright);
     background: rgba(88, 101, 242, 0.16);
+  }
+
+  .act.go {
+    color: var(--warn);
+    background: rgba(250, 168, 26, 0.14);
+  }
+
+  .act.go:hover {
+    background: var(--warn);
+    color: #1a1206;
+  }
+
+  .hold {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    margin-top: 9px;
+    padding: 8px 9px;
+    border-radius: var(--radius-sm);
+    background: rgba(250, 168, 26, 0.1);
+    font-size: 10.5px;
+    line-height: 1.45;
+    color: rgba(250, 200, 120, 0.92);
+  }
+
+  .hold svg {
+    width: 13px;
+    height: 13px;
+    flex-shrink: 0;
+    margin-top: 1px;
+    color: var(--warn);
   }
 
   .meta {

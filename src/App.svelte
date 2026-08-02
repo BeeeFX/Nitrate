@@ -92,7 +92,11 @@
   <UpdateBanner />
 
   {#if !settingsOpen && !app.editing}
-    <TargetPicker />
+    <TargetPicker settings={app.settings} onChange={(patch) => app.update(patch)} />
+  {/if}
+
+  {#if app.notice}
+    <div class="notice">{app.notice}</div>
   {/if}
 
   <section class="content">
@@ -177,6 +181,23 @@
   @keyframes pulse-glow {
     50% {
       opacity: 0.62;
+    }
+  }
+
+  .notice {
+    flex-shrink: 0;
+    padding: 7px 14px;
+    font-size: 11px;
+    color: rgba(250, 200, 120, 0.95);
+    background: rgba(250, 168, 26, 0.12);
+    border-bottom: 1px solid rgba(250, 168, 26, 0.22);
+    animation: drop 0.22s var(--ease-spring);
+  }
+
+  @keyframes drop {
+    from {
+      opacity: 0;
+      transform: translateY(-6px);
     }
   }
 

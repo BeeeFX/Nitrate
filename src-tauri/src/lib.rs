@@ -127,7 +127,7 @@ async fn inspect_file(
     let thumbnail = app.path().app_cache_dir().ok().and_then(|cache| {
         std::fs::create_dir_all(&cache).ok()?;
         let out = cache.join(format!("thumb-{}.jpg", fast_hash(&path)));
-        ffmpeg::thumbnail(&state.bins, &input, &out, info.duration * 0.25).ok()?;
+        ffmpeg::thumbnail(&state.bins, &input, &out, info.duration * 0.25, 320).ok()?;
         let bytes = std::fs::read(&out).ok()?;
         let _ = std::fs::remove_file(&out);
         Some(format!(
@@ -220,10 +220,16 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 // Editor support
 // ---------------------------------------------------------------------------
 
-fn frame_data_url(bins: &Binaries, input: &Path, at: f64, cache: &Path) -> Option<String> {
+fn frame_data_url(
+    bins: &Binaries,
+    input: &Path,
+    at: f64,
+    cache: &Path,
+    width: u32,
+) -> Option<String> {
     std::fs::create_dir_all(cache).ok()?;
-    let out = cache.join(format!("frame-{}.jpg", (at * 1000.0) as u64));
-    ffmpeg::thumbnail(bins, input, &out, at).ok()?;
+    let out = cache.join(format!("frame-{}-{}.jpg", width, (at * 1000.0) as u64));
+    ffmpeg::thumbnail(bins, input, &out, at, width).ok()?;
     let bytes = std::fs::read(&out).ok()?;
     let _ = std::fs::remove_file(&out);
     Some(format!(
@@ -245,8 +251,31 @@ async fn frame_at(
         .path()
         .app_cache_dir()
         .map_err(|e| format!("No cache folder: {e}"))?;
-    frame_data_url(&state.bins, &PathBuf::from(path), time.max(0.0), &cache)
-        .ok_or_else(|| "Couldn't read a frame from that video.".to_string())
+    // Wide enough to fill the editor's preview without being upscaled.
+    frame_data_url(
+        &state.bins,
+        &PathBuf::from(path),
+        time.max(0.0),
+        &cache,
+        960,
+    )
+    .ok_or_else(|| "Couldn't read a frame from that video.".to_string())
+}
+
+/// Lets the webview load this file directly, so the editor can play it.
+///
+/// The scope is extended per file rather than opened to the whole disk: only
+/// videos the user has actually added become readable.
+#[tauri::command]
+fn allow_preview(app: AppHandle, path: String) -> Result<String, String> {
+    let file = PathBuf::from(&path);
+    if !file.is_file() {
+        return Err("That file doesn't exist.".into());
+    }
+    app.asset_protocol_scope()
+        .allow_file(&file)
+        .map_err(|e| format!("Couldn't grant preview access: {e}"))?;
+    Ok(path)
 }
 
 /// Evenly spaced frames for the trim timeline.
@@ -270,7 +299,8 @@ async fn filmstrip(
         // Sample from the middle of each slice rather than its edge, so the
         // first frame isn't the usual black fade-in.
         let at = info.duration * ((i as f64 + 0.5) / count as f64);
-        match frame_data_url(&state.bins, &input, at, &cache) {
+        // Small: they're shown a few dozen pixels wide in the strip.
+        match frame_data_url(&state.bins, &input, at, &cache, 160) {
             Some(url) => frames.push(url),
             None => break,
         }
@@ -710,6 +740,7 @@ pub fn run() {
             frame_at,
             filmstrip,
             set_editor_size,
+            allow_preview,
         ])
         .setup(move |app| {
             tray::setup(app.handle(), Arc::clone(&suppress_hide))?;

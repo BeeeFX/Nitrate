@@ -233,21 +233,26 @@ pub fn probe(bins: &Binaries, input: &Path) -> Result<MediaInfo, String> {
     })
 }
 
-/// Grabs a single frame partway through the video, for the job card's thumbnail.
-pub fn thumbnail(bins: &Binaries, input: &Path, out: &Path, at: f64) -> Result<(), String> {
+/// Grabs a single frame partway through the video.
+///
+/// `width` matters: a card thumbnail wants a small one, but the editor's
+/// preview is shown at several hundred pixels and looks soft if it's upscaled
+/// from a postage stamp.
+pub fn thumbnail(
+    bins: &Binaries,
+    input: &Path,
+    out: &Path,
+    at: f64,
+    width: u32,
+) -> Result<(), String> {
     let status = base_command(&bins.ffmpeg)
         .args(["-y", "-ss"])
         .arg(format!("{at:.3}"))
         .arg("-i")
         .arg(input)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=320:-2:flags=bilinear",
-            "-q:v",
-            "6",
-        ])
+        .args(["-frames:v", "1", "-vf"])
+        .arg(format!("scale={width}:-2:flags=bilinear"))
+        .args(["-q:v", "4"])
         .arg(out)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

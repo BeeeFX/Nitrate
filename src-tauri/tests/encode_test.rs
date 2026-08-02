@@ -3,7 +3,9 @@
 //! The guarantee this app makes is "the output fits under the limit", so that's
 //! what these assert — against real ffmpeg, on a real file.
 
-use nitrate_lib::encode::{self, AudioCodec, Container, CropRect, Edits, Settings, VideoCodec};
+use nitrate_lib::encode::{
+    self, AudioCodec, Container, CropRect, Edits, QualityLevel, Settings, TargetMode, VideoCodec,
+};
 use nitrate_lib::ffmpeg;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,6 +50,8 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 fn settings(target_bytes: u64, dir: &Path) -> Settings {
     Settings {
+        mode: TargetMode::Size,
+        quality: QualityLevel::Balanced,
         target_bytes,
         video_codec: VideoCodec::H264,
         container: Container::Mp4,
@@ -296,6 +300,80 @@ fn cropping_changes_the_output_shape() {
         plan.height
     );
     assert!(bytes <= 10_000_000, "output was {bytes} bytes, over target");
+}
+
+#[test]
+fn quality_mode_encodes_without_a_size_target() {
+    let dir = temp_dir("quality");
+    let input = make_clip(&dir, "input.mp4", "640x360", 24, 5, 3000);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    // A deliberately tiny target that quality mode is meant to ignore. If the
+    // size check ever leaks into this path, the encode fails right here.
+    let mut set = settings(50_000, &dir);
+    set.mode = TargetMode::Quality;
+    set.quality = QualityLevel::Balanced;
+
+    let plan = encode::plan(&info, &set, &Edits::default(), &bins).expect("plan should succeed");
+
+    assert_eq!(plan.mode, TargetMode::Quality);
+    assert!(plan.crf.is_some(), "quality mode should choose a CRF");
+    assert_eq!(
+        plan.video_kbps, 0,
+        "there is no bitrate budget when no size is being targeted"
+    );
+    assert_eq!(
+        plan.height, 360,
+        "quality mode should keep the resolution it was given"
+    );
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("quality encode should succeed")
+        .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    assert!(outcome.final_bytes > 0, "produced an empty file");
+    assert!(
+        outcome.final_bytes > set.target_bytes,
+        "the clip should comfortably exceed the ignored target, otherwise this \
+         test proves nothing — got {} bytes",
+        outcome.final_bytes
+    );
+    assert_eq!(
+        outcome.attempts, 1,
+        "quality mode has no ceiling, so it should never retry"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn quality_mode_never_passes_a_file_through() {
+    let dir = temp_dir("quality-passthrough");
+    let input = make_clip(&dir, "input.mp4", "640x360", 24, 3, 400);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    let mut set = settings(10_000_000, &dir);
+    set.mode = TargetMode::Quality;
+
+    // Asking to compress is explicit, even for a file that would already fit.
+    assert!(
+        !encode::can_pass_through(&info, &set, &Edits::default(), &input),
+        "quality mode should always re-encode"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

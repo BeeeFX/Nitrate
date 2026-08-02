@@ -52,6 +52,12 @@ paying for Nitro.
   bitrate is genuinely enough, and tells you what it did.
 - **It won't touch what already fits.** A file under the limit is left exactly as
   it is, because re-encoding it could only make it worse.
+- **Or forget the limit entirely.** Pick **No limit** and it compresses well and
+  lets the size land where it lands — the sane choice for a long recording,
+  where no particular megabyte figure is the right answer.
+- **Long videos wait for you.** Anything over twenty minutes doesn't start on its
+  own: squeezing an hour into 10 MB is a long wait for something unwatchable, and
+  usually you wanted one moment out of it. It says so, and hands you the editor.
 - **Nothing is uploaded.** Every frame is encoded on your own machine.
 - **It gets out of the way.** Files land in Downloads. Close the window and it
   waits in the tray.
@@ -83,6 +89,10 @@ instead of dropping to 900p — the readout turns from amber to green when that
 happens.
 
 So the editor isn't a separate tool bolted on. It's a quality dial.
+
+The target size and codec live in here too, starting from whatever the main
+window says and overridable for this one video. That way **Compress** is never a
+mystery about what you're about to get.
 
 </td>
 </tr>
@@ -157,6 +167,7 @@ Sensible defaults, with everything exposed if you want it:
 
 | | |
 | --- | --- |
+| **Target** | A Discord tier, a size you type, or **No limit** |
 | **Codec** | H.264, H.265, VP9, AV1 |
 | **Container** | MP4, WebM, MKV |
 | **Resolution / frame rate** | Auto, or capped by hand |

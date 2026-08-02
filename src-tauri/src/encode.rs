@@ -88,9 +88,62 @@ pub enum AudioCodec {
     None,
 }
 
+/// Two ways to ask for a smaller file.
+///
+/// `Size` aims at an exact ceiling, which is what Discord needs. `Quality`
+/// just encodes well and accepts whatever size results — the sane choice for a
+/// long recording, where picking a megabyte figure is guesswork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetMode {
+    Size,
+    Quality,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QualityLevel {
+    Small,
+    Balanced,
+    High,
+}
+
+impl QualityLevel {
+    /// Constant-quality values, which mean different things to each encoder.
+    fn crf(self, codec: VideoCodec) -> u32 {
+        match (codec, self) {
+            (VideoCodec::H264, QualityLevel::Small) => 30,
+            (VideoCodec::H264, QualityLevel::Balanced) => 24,
+            (VideoCodec::H264, QualityLevel::High) => 20,
+
+            (VideoCodec::H265, QualityLevel::Small) => 32,
+            (VideoCodec::H265, QualityLevel::Balanced) => 27,
+            (VideoCodec::H265, QualityLevel::High) => 23,
+
+            (VideoCodec::Vp9, QualityLevel::Small) => 38,
+            (VideoCodec::Vp9, QualityLevel::Balanced) => 32,
+            (VideoCodec::Vp9, QualityLevel::High) => 28,
+
+            (VideoCodec::Av1, QualityLevel::Small) => 45,
+            (VideoCodec::Av1, QualityLevel::Balanced) => 35,
+            (VideoCodec::Av1, QualityLevel::High) => 28,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            QualityLevel::Small => "smallest",
+            QualityLevel::Balanced => "balanced",
+            QualityLevel::High => "high quality",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    pub mode: TargetMode,
+    pub quality: QualityLevel,
     pub target_bytes: u64,
     pub video_codec: VideoCodec,
     pub container: Container,
@@ -116,6 +169,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            mode: TargetMode::Size,
+            quality: QualityLevel::Balanced,
             target_bytes: 10 * 1000 * 1000,
             video_codec: VideoCodec::H264,
             container: Container::Mp4,
@@ -208,7 +263,11 @@ fn even(value: f64) -> u32 {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
+    pub mode: TargetMode,
+    /// Zero in quality mode, where there's no bitrate budget to spend.
     pub video_kbps: u32,
+    /// Set in quality mode only.
+    pub crf: Option<u32>,
     pub audio_kbps: u32,
     pub width: u32,
     pub height: u32,
@@ -238,6 +297,21 @@ pub fn plan(
     // than be applied as an afterthought.
     let duration = edits.duration(info.duration);
     let (source_width, source_height) = edits.dimensions(info.width, info.height);
+
+    // Quality mode short-circuits everything below: with no size to hit there's
+    // no budget to divide, no bits-per-pixel floor to defend, and nothing to
+    // verify afterwards. Just encode it well.
+    if settings.mode == TargetMode::Quality {
+        return plan_by_quality(
+            info,
+            settings,
+            edits,
+            bins,
+            source_width,
+            source_height,
+            notes,
+        );
+    }
 
     let margin = settings.safety_margin.clamp(0.5, 0.999);
     let usable_bits = settings.target_bytes as f64 * 8.0 * margin;
@@ -328,32 +402,106 @@ pub fn plan(
 
     let width = scaled_width(source_width, source_height, height);
 
-    // Pick the actual encoder, falling back to software if the GPU can't help.
-    let mut encoder = settings.video_codec.software().to_string();
-    if settings.hardware {
-        let available = ffmpeg::available_encoders(bins);
-        let pick = settings
-            .video_codec
-            .hardware()
-            .iter()
-            .find(|candidate| {
-                available.iter().any(|e| e == *candidate) && ffmpeg::encoder_works(bins, candidate)
-            })
-            .copied();
+    let encoder = pick_encoder(settings, bins, &mut notes);
 
-        match pick {
-            Some(hw) => {
-                encoder = hw.to_string();
-                notes.push(format!(
-                    "Using {hw} — fast, but size accuracy is looser than software."
-                ));
-            }
-            None => notes.push("No usable hardware encoder found; using software.".into()),
+    Ok(Plan {
+        mode: TargetMode::Size,
+        crf: None,
+        video_kbps: video_kbps.max(MIN_VIDEO_KBPS).round() as u32,
+        audio_kbps,
+        width,
+        height,
+        fps,
+        encoder,
+        downscaled: height < source_height,
+        notes,
+    })
+}
+
+/// Chooses the encoder, falling back to software when the GPU can't help.
+fn pick_encoder(settings: &Settings, bins: &Binaries, notes: &mut Vec<String>) -> String {
+    if !settings.hardware {
+        return settings.video_codec.software().to_string();
+    }
+
+    let available = ffmpeg::available_encoders(bins);
+    let pick = settings
+        .video_codec
+        .hardware()
+        .iter()
+        .find(|candidate| {
+            available.iter().any(|e| e == *candidate) && ffmpeg::encoder_works(bins, candidate)
+        })
+        .copied();
+
+    match pick {
+        Some(hw) => {
+            notes.push(format!(
+                "Using {hw} — fast, but size accuracy is looser than software."
+            ));
+            hw.to_string()
+        }
+        None => {
+            notes.push("No usable hardware encoder found; using software.".into());
+            settings.video_codec.software().to_string()
+        }
+    }
+}
+
+/// Planning when there's no size to hit — pick a constant quality and keep the
+/// picture as it is, apart from any caps the user asked for.
+fn plan_by_quality(
+    info: &MediaInfo,
+    settings: &Settings,
+    edits: &Edits,
+    bins: &Binaries,
+    source_width: u32,
+    source_height: u32,
+    mut notes: Vec<String>,
+) -> Result<Plan, String> {
+    let mut fps = info.fps;
+    if let Some(cap) = settings.max_fps {
+        if fps > cap {
+            fps = cap;
+            notes.push(format!("Frame rate capped at {} fps.", cap.round()));
         }
     }
 
+    let source_height = source_height.max(1);
+    let height = settings
+        .max_height
+        .unwrap_or(source_height)
+        .min(source_height);
+    let width = scaled_width(source_width, source_height, height);
+
+    let encoder = pick_encoder(settings, bins, &mut notes);
+    let crf = settings.quality.crf(settings.video_codec);
+
+    notes.push(format!(
+        "Encoding at {} quality — the size lands wherever it lands.",
+        settings.quality.label()
+    ));
+    if height < source_height {
+        notes.push(format!("Capped at {height}p."));
+    }
+
+    let audio_kbps = if info.has_audio() && settings.audio_codec != AudioCodec::None {
+        match settings.audio_codec {
+            AudioCodec::Copy => info
+                .audio_bitrate_kbps
+                .unwrap_or(settings.audio_bitrate_kbps),
+            _ => settings.audio_bitrate_kbps,
+        }
+    } else {
+        0
+    };
+
+    let _ = edits;
+
     Ok(Plan {
-        video_kbps: video_kbps.max(MIN_VIDEO_KBPS).round() as u32,
+        mode: TargetMode::Quality,
+        video_kbps: 0,
+        crf: Some(crf),
         audio_kbps,
         width,
         height,
@@ -493,8 +641,37 @@ fn build_args(
 
     args.push(s("-c:v"));
     args.push(plan.encoder.clone());
-    args.push(s("-b:v"));
-    args.push(format!("{}k", plan.video_kbps));
+
+    let is_hardware_encoder = !plan.encoder.starts_with("lib");
+    match plan.crf {
+        // Constant quality: the encoder decides the bitrate frame by frame.
+        Some(crf) => {
+            if is_hardware_encoder {
+                // Each vendor spells constant quality differently.
+                let flag = if plan.encoder.contains("nvenc") {
+                    "-cq"
+                } else if plan.encoder.contains("qsv") {
+                    "-global_quality"
+                } else {
+                    "-qp"
+                };
+                args.extend([s(flag), crf.to_string()]);
+                if plan.encoder.contains("nvenc") {
+                    args.extend([s("-rc"), s("vbr"), s("-b:v"), s("0")]);
+                }
+            } else {
+                args.extend([s("-crf"), crf.to_string()]);
+                // VP9 needs an explicit zero bitrate or -crf is ignored.
+                if plan.encoder == "libvpx-vp9" {
+                    args.extend([s("-b:v"), s("0")]);
+                }
+            }
+        }
+        None => {
+            args.push(s("-b:v"));
+            args.push(format!("{}k", plan.video_kbps));
+        }
+    }
 
     // Encoder-specific knobs. Every encoder spells "how hard should I work"
     // differently, so the UI's preset is translated here rather than there.
@@ -556,8 +733,9 @@ fn build_args(
         _ => {}
     }
 
-    if is_hardware {
-        // Hardware rate control drifts, so clamp it with an explicit ceiling.
+    // Only meaningful when aiming at a size: hardware rate control drifts, so
+    // it gets an explicit ceiling. In quality mode there's nothing to clamp.
+    if is_hardware && plan.crf.is_none() {
         args.extend([
             s("-maxrate"),
             format!("{}k", (plan.video_kbps as f64 * 1.35) as u32),
@@ -679,7 +857,10 @@ pub fn run_job(
         PASSLOG_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
 
-    let two_pass = settings.two_pass
+    // Two passes exist to hit a size accurately. Constant quality has no size
+    // to hit, so the analysis pass would be pure waste.
+    let two_pass = plan.crf.is_none()
+        && settings.two_pass
         && settings.video_codec.supports_two_pass()
         && plan.encoder.starts_with("lib");
 
@@ -734,8 +915,9 @@ pub fn run_job(
             .len();
 
         // Rate control aims, it doesn't promise. If we overshot, scale the
-        // bitrate by how far off we were and go again.
-        if final_bytes <= settings.target_bytes || attempts >= MAX_ATTEMPTS {
+        // bitrate by how far off we were and go again. Quality mode has no
+        // ceiling to overshoot, so whatever came out is the answer.
+        if plan.crf.is_some() || final_bytes <= settings.target_bytes || attempts >= MAX_ATTEMPTS {
             break;
         }
 
@@ -749,7 +931,10 @@ pub fn run_job(
 
     cleanup_passlog(&passlog);
 
-    if final_bytes > settings.target_bytes {
+    // Only a failure when a size was actually being aimed at. In quality mode
+    // the target is meaningless, and judging the result against it would fail
+    // almost every encode for doing exactly what was asked.
+    if plan.crf.is_none() && final_bytes > settings.target_bytes {
         return Err(format!(
             "Couldn't get under {} after {attempts} attempts (landed at {}). Try a lower resolution or a newer codec.",
             crate::format_size(settings.target_bytes),
@@ -777,6 +962,10 @@ pub fn can_pass_through(
     edits: &Edits,
     input: &Path,
 ) -> bool {
+    // Quality mode is an explicit "re-encode this", so there's nothing to skip.
+    if settings.mode == TargetMode::Quality {
+        return false;
+    }
     if !edits.is_empty() {
         return false;
     }

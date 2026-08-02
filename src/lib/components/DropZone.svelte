@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import { VIDEO_EXTENSIONS } from "../presets";
   import { app } from "../state.svelte";
 
   interface Props {
@@ -14,15 +15,9 @@
     const picked = await app.withDialog(() =>
       open({
         multiple: true,
-        filters: [
-          {
-            name: "Video",
-            extensions: [
-              "mp4", "mov", "mkv", "webm", "avi", "wmv", "flv",
-              "m4v", "mpg", "mpeg", "ts", "m2ts", "3gp", "ogv", "mts",
-            ],
-          },
-        ],
+        // The same list the drop handler enforces, so the picker and a drag
+        // can't disagree about what counts as a video.
+        filters: [{ name: "Video", extensions: VIDEO_EXTENSIONS }],
       }),
     );
 

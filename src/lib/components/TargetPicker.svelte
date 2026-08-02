@@ -1,30 +1,39 @@
 <script lang="ts">
-  import { TIERS } from "../presets";
-  import { app } from "../state.svelte";
+  import { QUALITY_LEVELS, TIERS } from "../presets";
+  import type { Settings } from "../types";
 
-  // Whichever tier matches the current target is highlighted; anything else
-  // means the user has typed their own number.
-  let matched = $derived(TIERS.find((t) => t.bytes === app.settings.targetBytes));
+  interface Props {
+    settings: Settings;
+    onChange: (patch: Partial<Settings>) => void;
+    /** The editor uses a tighter version of the same control. */
+    compact?: boolean;
+  }
+
+  let { settings, onChange, compact = false }: Props = $props();
+
+  const sizeMode = $derived(settings.mode === "size");
+  const matched = $derived(TIERS.find((t) => t.bytes === settings.targetBytes));
+
   let custom = $state(false);
   let customMb = $state(25);
 
   // Opening custom mode should start from whatever's currently set.
   $effect(() => {
-    if (!matched && !custom) {
+    if (sizeMode && !matched && !custom) {
       custom = true;
-      customMb = Math.round(app.settings.targetBytes / 1_000_000);
+      customMb = Math.round(settings.targetBytes / 1_000_000);
     }
   });
 
   function pickTier(bytes: number) {
     custom = false;
-    app.update({ targetBytes: bytes });
+    onChange({ mode: "size", targetBytes: bytes });
   }
 
   function openCustom() {
     custom = true;
-    customMb = Math.round(app.settings.targetBytes / 1_000_000) || 25;
-    app.update({ targetBytes: Math.max(1, customMb) * 1_000_000 });
+    customMb = Math.round(settings.targetBytes / 1_000_000) || 25;
+    onChange({ mode: "size", targetBytes: Math.max(1, customMb) * 1_000_000 });
   }
 
   function onCustomInput(event: Event) {
@@ -32,18 +41,24 @@
     if (!Number.isFinite(raw)) return;
     customMb = raw;
     const clamped = Math.min(Math.max(raw, 0.5), 10_000);
-    app.update({ targetBytes: Math.round(clamped * 1_000_000) });
+    onChange({ mode: "size", targetBytes: Math.round(clamped * 1_000_000) });
   }
+
+  const activeQuality = $derived(
+    QUALITY_LEVELS.find((q) => q.id === settings.quality),
+  );
 </script>
 
-<section class="target">
-  <div class="label">Target size</div>
+<section class="target" class:compact>
+  {#if !compact}
+    <div class="label">Target size</div>
+  {/if}
 
   <div class="tiers">
     {#each TIERS as tier (tier.id)}
       <button
         class="tier"
-        class:active={!custom && matched?.id === tier.id}
+        class:active={sizeMode && !custom && matched?.id === tier.id}
         onclick={() => pickTier(tier.bytes)}
       >
         <span class="tier-name">{tier.label}</span>
@@ -53,11 +68,15 @@
   </div>
 
   <div class="custom-row">
-    <button class="tier custom-toggle" class:active={custom} onclick={openCustom}>
+    <button
+      class="tier flat"
+      class:active={sizeMode && custom}
+      onclick={openCustom}
+    >
       Custom
     </button>
 
-    {#if custom}
+    {#if sizeMode && custom}
       <div class="custom-input">
         <input
           type="number"
@@ -72,7 +91,37 @@
         <span class="unit">MB</span>
       </div>
     {/if}
+
+    <!-- The escape hatch for long recordings, where no megabyte figure is
+         the obviously right answer. -->
+    <button
+      class="tier flat"
+      class:active={!sizeMode}
+      onclick={() => onChange({ mode: "quality" })}
+      title="Compress well and accept whatever size results"
+    >
+      No limit
+    </button>
   </div>
+
+  {#if !sizeMode}
+    <div class="quality">
+      <div class="quality-row">
+        {#each QUALITY_LEVELS as level (level.id)}
+          <button
+            class="tier flat"
+            class:active={settings.quality === level.id}
+            onclick={() => onChange({ quality: level.id })}
+          >
+            {level.label}
+          </button>
+        {/each}
+      </div>
+      {#if activeQuality}
+        <p class="hint">{activeQuality.hint}</p>
+      {/if}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -80,6 +129,11 @@
     padding: 12px 14px 14px;
     border-bottom: 1px solid var(--hairline);
     flex-shrink: 0;
+  }
+
+  .target.compact {
+    padding: 0;
+    border-bottom: none;
   }
 
   .label {
@@ -107,6 +161,10 @@
     background: var(--surface);
     border: 1px solid transparent;
     transition: background 0.15s, border-color 0.15s, transform 0.15s var(--ease-spring);
+  }
+
+  .compact .tier {
+    padding: 6px 4px;
   }
 
   .tier:hover {
@@ -146,7 +204,7 @@
     margin-top: 6px;
   }
 
-  .custom-toggle {
+  .flat {
     flex: 0 0 auto;
     padding: 7px 14px;
     font-size: 11px;
@@ -158,6 +216,7 @@
     display: flex;
     align-items: center;
     flex: 1;
+    min-width: 0;
     padding: 0 10px 0 12px;
     border-radius: var(--radius);
     background: var(--surface);
@@ -191,6 +250,23 @@
   .unit {
     font-size: 11px;
     font-weight: 600;
+    color: var(--text-faint);
+  }
+
+  .quality {
+    margin-top: 6px;
+  }
+
+  .quality-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+
+  .hint {
+    margin-top: 6px;
+    font-size: 10.5px;
+    line-height: 1.45;
     color: var(--text-faint);
   }
 </style>

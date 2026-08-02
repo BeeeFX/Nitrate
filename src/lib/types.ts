@@ -17,6 +17,8 @@ export interface FileInfo {
 }
 
 export interface Plan {
+  mode: TargetMode;
+  crf: number | null;
   videoKbps: number;
   audioKbps: number;
   width: number;
@@ -31,7 +33,12 @@ export type VideoCodec = "h264" | "h265" | "vp9" | "av1";
 export type Container = "mp4" | "webm" | "mkv";
 export type AudioCodec = "aac" | "opus" | "copy" | "none";
 
+export type TargetMode = "size" | "quality";
+export type QualityLevel = "small" | "balanced" | "high";
+
 export interface Settings {
+  mode: TargetMode;
+  quality: QualityLevel;
   targetBytes: number;
   videoCodec: VideoCodec;
   container: Container;
@@ -82,7 +89,9 @@ export type JobStatus =
   | "running"
   | "done"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  /** Deliberately not started — too long to squeeze into a fixed size. */
+  | "held";
 
 export interface Job {
   id: string;
@@ -107,6 +116,18 @@ export interface Job {
   edits: Edits;
   /** Finished without re-encoding, because it already fitted. */
   passedThrough: boolean;
+  /**
+   * Length in seconds, known before there's a local file — a link reports its
+   * duration up front, which is how a long VOD can be spotted without
+   * downloading gigabytes first.
+   */
+  knownDuration: number | null;
+  /**
+   * Per-video overrides set in the editor. Null means "whatever the main
+   * interface says", so changing the target there still moves everything that
+   * hasn't been given its own answer.
+   */
+  settings: Settings | null;
 }
 
 export interface Capabilities {

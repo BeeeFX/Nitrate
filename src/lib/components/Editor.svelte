@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { convertFileSrc, invoke } from "@tauri-apps/api/core";
   import { formatBitrate, formatDuration, formatSize } from "../format";
-  import { ASPECTS } from "../presets";
+  import { ASPECTS, VIDEO_CODECS } from "../presets";
   import { app } from "../state.svelte";
-  import type { CropRect, Job } from "../types";
+  import type { CropRect, Job, VideoCodec } from "../types";
+  import TargetPicker from "./TargetPicker.svelte";
 
   interface Props {
     job: Job;
@@ -14,6 +15,14 @@
   const duration = $derived(job.info?.duration ?? 0);
   const sourceW = $derived(job.info?.width ?? 0);
   const sourceH = $derived(job.info?.height ?? 0);
+
+  // Playback is preferred, but the webview can only decode some formats — MKV
+  // and ProRes it simply won't touch. Those fall back to stills pulled with
+  // ffmpeg, which is slower to scrub but works for everything.
+  let videoSrc = $state<string | null>(null);
+  let videoEl = $state<HTMLVideoElement | null>(null);
+  let canPlay = $state(false);
+  let playing = $state(false);
 
   let frame = $state<string | null>(null);
   let strip = $state<string[]>([]);
@@ -43,20 +52,33 @@
   const croppedW = $derived(crop ? Math.round(sourceW * crop.width) : sourceW);
   const croppedH = $derived(crop ? Math.round(sourceH * crop.height) : sourceH);
 
+  // This video's own compression settings, which start as whatever the main
+  // interface says and can be changed here without affecting anything else.
+  const settings = $derived(app.settingsFor(job));
+  const sizeMode = $derived(settings.mode === "size");
+
   const alreadyFits = $derived(
-    (job.info?.sizeBytes ?? 0) > 0 &&
-      (job.info?.sizeBytes ?? 0) <= app.settings.targetBytes,
+    sizeMode &&
+      (job.info?.sizeBytes ?? 0) > 0 &&
+      (job.info?.sizeBytes ?? 0) <= settings.targetBytes,
   );
   const dirty = $derived(isTrimmed || crop !== null);
   // Nothing to do only when it already fits *and* hasn't been edited.
   const canCompress = $derived(dirty || !alreadyFits);
 
   // ---------------------------------------------------------------------
-  // Frames
+  // Preview source
   // ---------------------------------------------------------------------
 
-  async function loadFrame(at: number) {
+  $effect(() => {
     if (!job.path) return;
+    void invoke<string>("allow_preview", { path: job.path })
+      .then((p) => (videoSrc = convertFileSrc(p)))
+      .catch(() => (videoSrc = null));
+  });
+
+  async function loadFrame(at: number) {
+    if (!job.path || canPlay) return;
     loadingFrame = true;
     try {
       frame = await invoke<string>("frame_at", { path: job.path, time: at });
@@ -67,10 +89,11 @@
     }
   }
 
-  // Scrubbing would otherwise fire an ffmpeg call per pixel of mouse movement.
+  // Scrubbing stills would otherwise fire an ffmpeg call per pixel of movement.
   let frameTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     const at = playhead;
+    if (canPlay) return;
     clearTimeout(frameTimer);
     frameTimer = setTimeout(() => void loadFrame(at), 110);
     return () => clearTimeout(frameTimer);
@@ -97,6 +120,51 @@
   });
 
   // ---------------------------------------------------------------------
+  // Playback
+  // ---------------------------------------------------------------------
+
+  let raf = 0;
+
+  function follow() {
+    if (!videoEl || !playing) return;
+    playhead = videoEl.currentTime;
+    // Looping the selection is what makes a trim easy to judge.
+    if (videoEl.currentTime >= effectiveOut) {
+      videoEl.currentTime = inPoint;
+    }
+    raf = requestAnimationFrame(follow);
+  }
+
+  function togglePlay() {
+    if (!videoEl || !canPlay) return;
+    if (playing) {
+      videoEl.pause();
+      return;
+    }
+    if (videoEl.currentTime < inPoint || videoEl.currentTime >= effectiveOut) {
+      videoEl.currentTime = inPoint;
+    }
+    void videoEl.play();
+  }
+
+  function onPlay() {
+    playing = true;
+    raf = requestAnimationFrame(follow);
+  }
+
+  function onPause() {
+    playing = false;
+    cancelAnimationFrame(raf);
+  }
+
+  function seek(to: number) {
+    playhead = to;
+    if (videoEl && canPlay) videoEl.currentTime = to;
+  }
+
+  $effect(() => () => cancelAnimationFrame(raf));
+
+  // ---------------------------------------------------------------------
   // Crop
   // ---------------------------------------------------------------------
 
@@ -115,7 +183,6 @@
     }
     if (sourceW === 0 || sourceH === 0) return;
 
-    // Work in pixels so the aspect is true on screen, then store as fractions.
     const sourceRatio = sourceW / sourceH;
     let w = 1;
     let h = 1;
@@ -133,7 +200,8 @@
   }
 
   type DragMode = "move" | "nw" | "ne" | "sw" | "se";
-  let drag: { mode: DragMode; startX: number; startY: number; rect: CropRect } | null = null;
+  let drag: { mode: DragMode; startX: number; startY: number; rect: CropRect } | null =
+    null;
 
   function beginDrag(event: PointerEvent, mode: DragMode) {
     if (!crop) return;
@@ -186,7 +254,6 @@
     }
 
     if (ratio !== null && sourceW > 0 && sourceH > 0) {
-      // Height follows width so the on-screen shape matches the chosen ratio.
       const sourceRatio = sourceW / sourceH;
       h = (w * sourceRatio) / ratio;
       if (h > 1) {
@@ -236,6 +303,7 @@
     event.stopPropagation();
     event.preventDefault();
     scrub = handle;
+    if (playing) videoEl?.pause();
     onScrub(event);
   }
 
@@ -244,19 +312,19 @@
     const t = timeFromEvent(event);
     if (scrub === "in") {
       inPoint = Math.min(t, effectiveOut - 0.2);
-      playhead = inPoint;
+      seek(inPoint);
     } else if (scrub === "out") {
       outPoint = Math.max(t, inPoint + 0.2);
-      playhead = outPoint;
+      seek(outPoint);
     } else {
-      playhead = t;
+      seek(t);
     }
   }
 
   function resetTrim() {
     inPoint = 0;
     outPoint = null;
-    playhead = 0;
+    seek(0);
   }
 
   const pct = (t: number) => (duration > 0 ? (t / duration) * 100 : 0);
@@ -288,19 +356,35 @@
   </header>
 
   <div class="stage">
-    <!-- The preview is a still rather than a video element: it costs one
-         ffmpeg call per scrub, but it works for formats the webview can't
-         play at all, like MKV and ProRes. -->
     <div class="preview" bind:this={previewEl}>
-      {#if frame}
-        <img src={frame} alt="" draggable="false" />
-      {:else}
-        <div class="frame-loading">Reading frame…</div>
+      {#if videoSrc}
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video
+          bind:this={videoEl}
+          src={videoSrc}
+          class:hidden={!canPlay}
+          muted
+          playsinline
+          preload="auto"
+          oncanplay={() => (canPlay = true)}
+          onerror={() => {
+            canPlay = false;
+            videoSrc = null;
+          }}
+          onplay={onPlay}
+          onpause={onPause}
+        ></video>
+      {/if}
+
+      {#if !canPlay}
+        {#if frame}
+          <img src={frame} alt="" draggable="false" />
+        {:else}
+          <div class="frame-loading">Reading frame…</div>
+        {/if}
       {/if}
 
       {#if crop}
-        <div class="shade" style:--x="{crop.x * 100}%" style:--y="{crop.y * 100}%"
-             style:--w="{crop.width * 100}%" style:--h="{crop.height * 100}%"></div>
         <div
           class="crop"
           role="application"
@@ -334,7 +418,7 @@
         </div>
       {/if}
 
-      {#if loadingFrame}<div class="spinner"></div>{/if}
+      {#if loadingFrame && !canPlay}<div class="spinner"></div>{/if}
     </div>
   </div>
 
@@ -396,14 +480,75 @@
       </div>
 
       <div class="times tnum">
-        <span>{formatDuration(inPoint)}</span>
+        <div class="left-group">
+          <button
+            class="play"
+            onclick={togglePlay}
+            disabled={!canPlay}
+            title={canPlay
+              ? "Play the selection"
+              : "This format can't be played here — scrub the timeline instead"}
+            aria-label={playing ? "Pause" : "Play"}
+          >
+            {#if playing}
+              <svg viewBox="0 0 24 24"
+                ><path d="M8 5h3v14H8zM13 5h3v14h-3z" fill="currentColor" /></svg
+              >
+            {:else}
+              <svg viewBox="0 0 24 24"
+                ><path d="M8 5l11 7-11 7z" fill="currentColor" /></svg
+              >
+            {/if}
+          </button>
+          <span>{formatDuration(inPoint)}</span>
+        </div>
+
         <span class="mid">
           {formatDuration(trimmed)} selected
           {#if isTrimmed}
             <button class="reset" onclick={resetTrim}>reset</button>
           {/if}
         </span>
+
         <span>{formatDuration(effectiveOut)}</span>
+      </div>
+    </div>
+
+    <!-- The same target control as the main window, but writing to this video
+         only — so "Compress" is never a mystery about what it will produce. -->
+    <div class="compression">
+      <div class="row">
+        <span class="label">Compress to</span>
+        {#if job.settings}
+          <button class="linkish" onclick={() => app.clearJobSettings(job.id)}>
+            reset to default
+          </button>
+        {/if}
+      </div>
+
+      <TargetPicker
+        compact
+        settings={settings}
+        onChange={(patch) => app.updateJobSettings(job.id, patch)}
+      />
+
+      <div class="row codec-row">
+        <span class="label">Codec</span>
+        <div class="chips">
+          {#each VIDEO_CODECS as codec (codec.id)}
+            <button
+              class="chip"
+              class:active={settings.videoCodec === codec.id}
+              title={codec.hint}
+              onclick={() =>
+                app.updateJobSettings(job.id, {
+                  videoCodec: codec.id as VideoCodec,
+                })}
+            >
+              {codec.label}
+            </button>
+          {/each}
+        </div>
       </div>
     </div>
 
@@ -416,11 +561,17 @@
             {job.plan.width}×{job.plan.height}
           </strong>
           <span class="sep">·</span>
-          <span>{formatBitrate(job.plan.videoKbps)}</span>
-          <span class="sep">·</span>
-          <span class="target">{formatSize(app.settings.targetBytes)}</span>
+          {#if job.plan.mode === "quality"}
+            <span>quality {settings.quality}</span>
+            <span class="sep">·</span>
+            <span class="target">size not fixed</span>
+          {:else}
+            <span>{formatBitrate(job.plan.videoKbps)}</span>
+            <span class="sep">·</span>
+            <span class="target">{formatSize(settings.targetBytes)}</span>
+          {/if}
         {:else if alreadyFits && !dirty}
-          <span class="dim">Already under {formatSize(app.settings.targetBytes)}</span>
+          <span class="dim">Already under {formatSize(settings.targetBytes)}</span>
         {:else}
           <span class="dim">Working out the plan…</span>
         {/if}
@@ -501,14 +652,16 @@
     min-height: 0;
     display: grid;
     place-items: center;
-    padding: 14px;
+    padding: 12px 14px;
   }
 
+  /* Sized to the media exactly, because the crop rectangle is positioned
+     against it — any padding here would offset the crop. */
   .preview {
     position: relative;
+    display: inline-block;
     max-width: 100%;
     max-height: 100%;
-    display: inline-block;
     line-height: 0;
     border-radius: var(--radius);
     overflow: hidden;
@@ -516,56 +669,47 @@
     touch-action: none;
   }
 
-  .preview img {
+  .preview img,
+  .preview video {
     display: block;
     max-width: 100%;
-    max-height: 46vh;
-    object-fit: contain;
+    max-height: 100%;
+    width: auto;
+    height: auto;
     user-select: none;
+  }
+
+  .preview video.hidden {
+    display: none;
   }
 
   .frame-loading {
     display: grid;
     place-items: center;
-    width: 420px;
-    height: 236px;
+    width: 520px;
+    height: 292px;
     font-size: 12px;
     color: var(--text-faint);
-    line-height: 1.4;
   }
 
-  /* Four rectangles rather than a box-shadow, so the darkened region is
-     exact regardless of the preview's size. */
-  .shade {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background:
-      linear-gradient(rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.55)) no-repeat 0 0 /
-        100% var(--y),
-      linear-gradient(rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.55)) no-repeat 0 100% /
-        100% calc(100% - var(--y) - var(--h)),
-      linear-gradient(rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.55)) no-repeat 0 var(--y) /
-        var(--x) var(--h),
-      linear-gradient(rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.55)) no-repeat 100%
-        var(--y) / calc(100% - var(--x) - var(--w)) var(--h);
-  }
-
+  /* One enormous shadow rather than four bands: exact by construction, and
+     it can't leave seams or double-darkened corners. */
   .crop {
     position: absolute;
     border: 1.5px solid var(--blurple-bright);
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.55);
     cursor: move;
     touch-action: none;
   }
 
   .handle {
     position: absolute;
-    width: 14px;
-    height: 14px;
+    width: 13px;
+    height: 13px;
+    padding: 0;
     background: var(--blurple-bright);
     border-radius: 3px;
-    border: 2px solid rgba(10, 12, 18, 0.8);
+    border: 2px solid rgba(10, 12, 18, 0.85);
     touch-action: none;
   }
 
@@ -727,6 +871,7 @@
     bottom: 0;
     width: 12px;
     margin-left: -6px;
+    padding: 0;
     background: var(--blurple-bright);
     border-radius: 3px;
     box-shadow: 0 0 10px rgba(88, 101, 242, 0.7);
@@ -740,6 +885,37 @@
     align-items: center;
     font-size: 11px;
     color: var(--text-dim);
+  }
+
+  .left-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .play {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--surface-strong);
+    color: var(--text);
+    transition: background 0.14s, opacity 0.14s;
+  }
+
+  .play svg {
+    width: 13px;
+    height: 13px;
+  }
+
+  .play:hover:not(:disabled) {
+    background: var(--blurple);
+  }
+
+  .play:disabled {
+    opacity: 0.35;
+    cursor: default;
   }
 
   .mid {
@@ -757,6 +933,29 @@
   }
 
   .reset:hover {
+    text-decoration: underline;
+  }
+
+  .compression {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 11px;
+    border-radius: var(--radius);
+    background: rgba(255, 255, 255, 0.028);
+    border: 1px solid var(--hairline);
+  }
+
+  .codec-row {
+    gap: 10px;
+  }
+
+  .linkish {
+    font-size: 10.5px;
+    color: var(--blurple-bright);
+  }
+
+  .linkish:hover {
     text-decoration: underline;
   }
 

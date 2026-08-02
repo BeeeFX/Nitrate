@@ -269,7 +269,11 @@ fn summarise_yt_dlp_error(stderr: &str) -> String {
     let cleaned = line.replace("ERROR: ", "");
     let lower = cleaned.to_lowercase();
 
-    if lower.contains("unsupported url") {
+    if lower.contains("not currently live") || lower.contains("live event will begin") {
+        "That channel isn't live right now.".into()
+    } else if lower.contains("live stream") && lower.contains("not available") {
+        "That live stream can't be downloaded — wait until it has finished.".into()
+    } else if lower.contains("unsupported url") {
         "That site isn't supported.".into()
     } else if lower.contains("private") || lower.contains("login") || lower.contains("cookies") {
         "That video is private or needs a sign-in.".into()

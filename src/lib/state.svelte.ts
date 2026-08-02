@@ -8,9 +8,11 @@ import {
 import { load, type Store } from "@tauri-apps/plugin-store";
 import {
   DEFAULT_SETTINGS,
+  LONG_VIDEO_SECONDS,
   audioCodecsFor,
   containersFor,
   defaultPresetFor,
+  isVideoFile,
   presetsFor,
 } from "./presets";
 import {
@@ -42,11 +44,15 @@ class AppStore {
   ready = $state(false);
   /** Id of the job whose editor is open, if any. */
   editingId = $state<string | null>(null);
+  /** Transient message, for things the user should know but needn't act on. */
+  notice = $state<string | null>(null);
 
   #store: Store | null = null;
 
   active = $derived(this.jobs.filter((j) => j.status === "running").length);
   queued = $derived(this.jobs.filter((j) => j.status === "queued").length);
+  // A held job isn't working and isn't finished — it's waiting for a decision.
+  held = $derived(this.jobs.filter((j) => j.status === "held").length);
   busy = $derived(this.active + this.queued > 0);
 
   /** Aggregate progress across everything still in flight, for the header bar. */
@@ -246,6 +252,52 @@ class AppStore {
     void this.#loadPlan(job);
   }
 
+  /** What a job will actually be encoded with — its own answer, or the global one. */
+  settingsFor(job: Job): Settings {
+    return job.settings ?? this.settings;
+  }
+
+  /** Gives a job its own compression settings, from the editor. */
+  updateJobSettings(id: string, patch: Partial<Settings>) {
+    const job = this.#find(id);
+    if (!job) return;
+
+    const next = { ...this.settingsFor(job), ...patch };
+
+    if (patch.videoCodec) {
+      const allowed = containersFor(patch.videoCodec);
+      if (!allowed.includes(next.container)) next.container = allowed[0];
+    }
+    const allowedAudio = audioCodecsFor(next.container);
+    if (!allowedAudio.includes(next.audioCodec)) next.audioCodec = allowedAudio[0];
+
+    if (patch.videoCodec !== undefined || patch.hardware !== undefined) {
+      const valid = presetsFor(next.videoCodec, next.hardware).map((p) => p.value);
+      if (!valid.includes(next.preset)) {
+        next.preset = defaultPresetFor(next.videoCodec, next.hardware);
+      }
+    }
+
+    job.settings = next;
+    void this.#loadPlan(job);
+  }
+
+  /** Hands a job back to the global settings. */
+  clearJobSettings(id: string) {
+    const job = this.#find(id);
+    if (!job) return;
+    job.settings = null;
+    void this.#loadPlan(job);
+  }
+
+  /** Shows a short-lived message and clears it again. */
+  #say(message: string) {
+    this.notice = message;
+    setTimeout(() => {
+      if (this.notice === message) this.notice = null;
+    }, 5000);
+  }
+
   #blankJob(id: string, kind: "file" | "url"): Job {
     return {
       id,
@@ -267,7 +319,22 @@ class AppStore {
       startedAt: null,
       edits: emptyEdits(),
       passedThrough: false,
+      knownDuration: null,
+      settings: null,
     };
+  }
+
+  /**
+   * Long videos wait to be started by hand. Squeezing a two-hour stream into
+   * ten megabytes takes ages and produces something nobody wants — the useful
+   * thing is almost always a section of it.
+   *
+   * This only applies when aiming at a size. "No limit" is exactly the right
+   * answer for a long recording, so choosing it removes the objection.
+   */
+  #shouldHoldBack(job: Job): boolean {
+    if (this.settingsFor(job).mode !== "size") return false;
+    return (job.knownDuration ?? 0) > LONG_VIDEO_SECONDS;
   }
 
   /** Queues a pasted link. The fetch itself happens on a worker thread. */
@@ -289,7 +356,11 @@ class AppStore {
     try {
       const info = await invoke<UrlInfo>("inspect_url", { url: trimmed });
       job.name = info.title;
+      job.knownDuration = info.duration;
       job.stage = "Ready";
+
+      // Long recordings download as normal — `start` sees the duration and
+      // stops before compressing, leaving a file ready to trim.
       if (this.autoStart) await this.start(id);
     } catch (err) {
       job.status = "failed";
@@ -300,7 +371,21 @@ class AppStore {
 
   /** Adds dropped or picked files, probing each before it appears settled. */
   async addFiles(paths: string[]) {
-    const fresh = paths.filter(
+    // Refuse anything that clearly isn't video up front. Letting it through
+    // would just make a job that fails a second later at the probe.
+    const videos = paths.filter(isVideoFile);
+    const rejected = paths.length - videos.length;
+    if (rejected > 0) {
+      this.#say(
+        videos.length === 0
+          ? rejected === 1
+            ? "That isn't a video file."
+            : "Those aren't video files."
+          : `Skipped ${rejected} file${rejected === 1 ? "" : "s"} that ${rejected === 1 ? "isn't" : "aren't"} video.`,
+      );
+    }
+
+    const fresh = videos.filter(
       (p) => !this.jobs.some((j) => j.path === p && j.status !== "done"),
     );
 
@@ -324,9 +409,17 @@ class AppStore {
         job.name = details.name;
         job.originalBytes = details.info.sizeBytes;
         job.thumbnail = details.thumbnail;
-        job.stage = "Ready";
+        job.knownDuration = details.info.duration;
         await this.#loadPlan(job);
 
+        // Nothing to fetch for a local file, so a long one simply waits.
+        if (this.#shouldHoldBack(job)) {
+          job.status = "held";
+          job.stage = "Waiting for you";
+          continue;
+        }
+
+        job.stage = "Ready";
         if (this.autoStart) await this.start(job.id);
       } catch (err) {
         job.status = "failed";
@@ -341,7 +434,7 @@ class AppStore {
     try {
       job.plan = await invoke<Plan>("preview_plan", {
         path: job.path,
-        settings: $state.snapshot(this.settings),
+        settings: $state.snapshot(this.settingsFor(job)),
         edits: $state.snapshot(job.edits),
       });
     } catch {
@@ -382,6 +475,14 @@ class AppStore {
     job.error = null;
     job.startedAt = null;
 
+    // A long recording still gets downloaded — you need the file in front of
+    // you to choose a section — it just stops before compressing.
+    const holdBack = job.kind === "url" && this.#shouldHoldBack(job);
+    const settings = {
+      ...$state.snapshot(this.settingsFor(job)),
+      ...(holdBack ? { autoCompressDownloads: false } : {}),
+    };
+
     try {
       await invoke("start_job", {
         id: job.id,
@@ -389,7 +490,7 @@ class AppStore {
         path: job.kind === "file" ? job.path : null,
         url: job.kind === "url" ? job.url : null,
         title: job.name,
-        settings: $state.snapshot(this.settings),
+        settings,
         edits: $state.snapshot(job.edits),
       });
     } catch (err) {
@@ -421,7 +522,8 @@ class AppStore {
   /** Drops everything that's finished, one way or another. */
   clearFinished() {
     this.jobs = this.jobs.filter(
-      (j) => j.status === "running" || j.status === "queued",
+      (j) =>
+        j.status === "running" || j.status === "queued" || j.status === "held",
     );
   }
 

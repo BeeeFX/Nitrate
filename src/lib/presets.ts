@@ -1,4 +1,34 @@
-import type { AudioCodec, Container, Settings, VideoCodec } from "./types";
+import type {
+  AudioCodec,
+  Container,
+  QualityLevel,
+  Settings,
+  VideoCodec,
+} from "./types";
+
+/**
+ * What the drop zone and file picker will take.
+ *
+ * Dropping a PDF used to create a job that failed a second later at the probe;
+ * refusing it up front is both faster and kinder.
+ */
+export const VIDEO_EXTENSIONS = [
+  "mp4", "mov", "mkv", "webm", "avi", "wmv", "flv", "m4v",
+  "mpg", "mpeg", "ts", "m2ts", "mts", "3gp", "ogv", "vob",
+  "asf", "rm", "rmvb", "divx", "f4v", "m2v", "mxf", "gif",
+];
+
+export function isVideoFile(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return VIDEO_EXTENSIONS.includes(ext);
+}
+
+/** Quality mode: squeeze it sensibly and let the size land where it lands. */
+export const QUALITY_LEVELS: { id: QualityLevel; label: string; hint: string }[] = [
+  { id: "small", label: "Smallest", hint: "Hardest squeeze. Visible on detailed footage." },
+  { id: "balanced", label: "Balanced", hint: "Good quality at a fraction of the size." },
+  { id: "high", label: "Best", hint: "Near-original. Still much smaller than the source." },
+];
 
 export interface Tier {
   id: string;
@@ -134,6 +164,8 @@ export function audioCodecsFor(container: Container): AudioCodec[] {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
+  mode: "size",
+  quality: "balanced",
   targetBytes: 10_000_000,
   videoCodec: "h264",
   container: "mp4",
@@ -149,6 +181,15 @@ export const DEFAULT_SETTINGS: Settings = {
   autoCompressDownloads: true,
   maxDownloadHeight: 1080,
 };
+
+/**
+ * Past this, a video won't start compressing on its own.
+ *
+ * Squeezing an hours-long stream VOD into ten megabytes gives you something
+ * unwatchable after a very long wait, and it's almost never what was wanted —
+ * usually one moment out of it was. So it waits for you to trim it.
+ */
+export const LONG_VIDEO_SECONDS = 20 * 60;
 
 export const DOWNLOAD_HEIGHTS = [
   { value: 2160, label: "4K" },
