@@ -4,7 +4,7 @@
 // background scripts and a stable add-on id. Everything else is shared, so the
 // build just copies `src/` and drops the right manifest on top.
 
-import { execFileSync } from "node:child_process";
+import AdmZip from "adm-zip";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,14 +59,18 @@ async function build() {
       `${JSON.stringify(manifest, null, 2)}\n`,
     );
 
-    // bsdtar ships with Windows 10+, macOS and most Linux distributions, so
-    // zipping needs no dependency.
-    const zip = join(outRoot, `nitrate-extension-${target.name}-${version}.zip`);
-    execFileSync("tar", ["-a", "-c", "-f", zip, "-C", out, "."], {
-      stdio: "inherit",
-    });
+    // Zipped in-process rather than by shelling out to `tar`.
+    //
+    // That looked portable and wasn't: Git Bash carries GNU tar, which can't
+    // write zip archives at all, and reads a Windows path like `D:\a\...` as a
+    // remote `host:path`. It only worked locally because PowerShell resolved
+    // `tar` to Windows' bsdtar instead.
+    const zipPath = join(outRoot, `nitrate-extension-${target.name}-${version}.zip`);
+    const zip = new AdmZip();
+    zip.addLocalFolder(out);
+    zip.writeZip(zipPath);
 
-    console.log(`  ${target.name}: ${zip}`);
+    console.log(`  ${target.name}: ${zipPath}`);
   }
 }
 

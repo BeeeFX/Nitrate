@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 280" width="440" height="280">
+  <defs>
+    <radialGradient id="tileGlow" cx="50%" cy="28%" r="70%">
+      <stop offset="0%" stop-color="#5865F2" stop-opacity="0.42"/>
+      <stop offset="100%" stop-color="#5865F2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="440" height="280" fill="#0B0C12"/>
+  <rect width="440" height="280" fill="url(#tileGlow)"/>
+
+  <g transform="translate(186, 48) scale(0.0703)">
+    <rect x="64" y="64" width="896" height="896" rx="232" fill="#5865F2"/>
+    <g stroke="#FFFFFF" stroke-width="76" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <polyline points="348,300 512,414 676,300"/>
+      <polyline points="348,724 512,610 676,724"/>
+    </g>
+    <rect x="336" y="478" width="352" height="68" rx="34" fill="#FFFFFF"/>
+  </g>
+
+  <text x="220" y="178" text-anchor="middle" fill="#EDEEF4"
+        font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
+        font-size="32" font-weight="700">Send to Nitrate</text>
+
+  <text x="220" y="212" text-anchor="middle" fill="#9BA0B4"
+        font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="16">
+    Video links, one click, no copying
+  </text>
+</svg>

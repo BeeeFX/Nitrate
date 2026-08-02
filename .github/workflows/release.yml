@@ -94,21 +94,13 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
-      # The extension is platform-independent, so only one job builds it.
-      - name: Attach the browser extension
-        if: matrix.platform == 'windows-latest'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          npm run extension
-          gh release upload "${{ github.ref_name }}" \
-            extension/dist/nitrate-extension-*.zip --clobber
-
       # tauri-action also uploads a standalone .sig for each installer. The
       # updater never fetches it — the signature it checks is embedded in
       # latest.json — so on the release page it's just an unexplained 0 KB file
       # next to the thing people actually want to download.
+      #
+      # This runs immediately after the build, before anything else that could
+      # fail: tidying the release shouldn't be hostage to a later step.
       - name: Drop the redundant signature files
         shell: bash
         env:
@@ -120,3 +112,14 @@ jobs:
             echo "removing $asset"
             gh release delete-asset "${{ github.ref_name }}" "$asset" --yes
           done
+
+      # Platform-independent, so only one job in the matrix builds it.
+      - name: Attach the browser extension
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm run extension
+          gh release upload "${{ github.ref_name }}" \
+            extension/dist/nitrate-extension-*.zip --clobber

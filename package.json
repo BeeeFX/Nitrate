@@ -32,6 +32,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@tauri-apps/cli": "^2.2.5",
     "@tsconfig/svelte": "^5.0.4",
+    "adm-zip": "^0.6.0",
     "sharp": "^0.35.3",
     "svelte": "^5.19.0",
     "svelte-check": "^4.1.4",
