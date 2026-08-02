@@ -32,8 +32,8 @@ paying for Nitro.
 <p align="center"><sub><b>Every file, its own progress</b></sub></p>
 </td>
 <td width="33%" valign="top">
-<img src="docs/screenshot-done.png" alt="Three finished videos showing 167 MB down to 9.2 MB, 68 MB to 9.6 MB and 46 MB to 9.8 MB" width="100%">
-<p align="center"><sub><b>167 MB → 9.2 MB</b></sub></p>
+<img src="docs/screenshot-done.png" alt="Three finished videos showing 45.8 MB down to 9.7 MB, 33.1 MB to 9.5 MB and 28.7 MB to 9.9 MB" width="100%">
+<p align="center"><sub><b>45.8 MB → 9.7 MB</b></sub></p>
 </td>
 </tr>
 </table>
@@ -69,7 +69,7 @@ the shortcut, and it starts straight away.
 <table>
 <tr>
 <td width="55%" valign="top">
-<img src="docs/screenshot-editor.png" alt="The editor: a video frame with a square crop rectangle over it, aspect ratio buttons, a filmstrip timeline, and a readout reading 1080x1080 at 2.4 Mbps" width="100%">
+<img src="docs/screenshot-editor.png" alt="The editor: a video frame with aspect ratio buttons beneath it, a filmstrip timeline with a play button, compression settings, and a readout reading 2880x2160 down to 1440x1080 at 2.3 Mbps" width="100%">
 </td>
 <td valign="top">
 
@@ -196,7 +196,7 @@ So the app doesn't trust the caller. Instead it:
 <table>
 <tr>
 <td width="46%" valign="top">
-<img src="docs/screenshot-long.png" alt="A 34 minute video held back, with an amber note explaining that squeezing all of it into 10 MB would look poor" width="100%">
+<img src="docs/screenshot-long.png" alt="A 26 minute video held back, with an amber note explaining that squeezing all of it into 10 MB would look poor" width="100%">
 </td>
 <td valign="top">
 

@@ -32,3 +32,6 @@ src-tauri/icons/ios/
 .DS_Store
 Thumbs.db
 *.log
+
+# Sample videos used for screenshots, not part of the project
+examples/
