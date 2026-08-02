@@ -24,7 +24,7 @@ paying for Nitro.
 <table>
 <tr>
 <td width="33%" valign="top">
-<img src="docs/screenshot-empty.png" alt="The drop zone, with target size tabs for 10, 50, 100 and 500 MB" width="100%">
+<img src="docs/screenshot-empty.png" alt="The drop zone, with target size tabs for 10, 50, 100 and 500 MB plus custom and no limit" width="100%">
 <p align="center"><sub><b>Pick a size, drop a file</b></sub></p>
 </td>
 <td width="33%" valign="top">
@@ -32,8 +32,8 @@ paying for Nitro.
 <p align="center"><sub><b>Every file, its own progress</b></sub></p>
 </td>
 <td width="33%" valign="top">
-<img src="docs/screenshot-done.png" alt="Three finished videos showing 167 MB down to 9.3 MB, 68 MB to 9.7 MB and 46 MB to 9.9 MB" width="100%">
-<p align="center"><sub><b>167 MB → 9.3 MB</b></sub></p>
+<img src="docs/screenshot-done.png" alt="Three finished videos showing 167 MB down to 9.2 MB, 68 MB to 9.6 MB and 46 MB to 9.8 MB" width="100%">
+<p align="center"><sub><b>167 MB → 9.2 MB</b></sub></p>
 </td>
 </tr>
 </table>
@@ -55,9 +55,8 @@ paying for Nitro.
 - **Or forget the limit entirely.** Pick **No limit** and it compresses well and
   lets the size land where it lands — the sane choice for a long recording,
   where no particular megabyte figure is the right answer.
-- **Long videos wait for you.** Anything over twenty minutes doesn't start on its
-  own: squeezing an hour into 10 MB is a long wait for something unwatchable, and
-  usually you wanted one moment out of it. It says so, and hands you the editor.
+- **Long videos wait for you** rather than grinding away at something you didn't
+  want. More on that below.
 - **Nothing is uploaded.** Every frame is encoded on your own machine.
 - **It gets out of the way.** Files land in Downloads. Close the window and it
   waits in the tray.
@@ -81,17 +80,18 @@ time.
 Drag a crop rectangle — freeform or locked to 16:9, 1:1, 9:16 or 4:5 — and drag
 the handles on the filmstrip to set where the clip starts and ends.
 
-**The readout updates as you drag, and that's the point.** Trimming and cropping
-both feed straight back into the bitrate budget: cut a ten-minute clip to thirty
-seconds and the same 10 MB buys roughly twenty times the bitrate. In the
-screenshot, cropping to a square is what let this clip keep its full 1080 lines
-instead of dropping to 900p — the readout turns from amber to green when that
-happens.
+**The readout at the bottom updates as you drag, and that's the point.** Trimming
+and cropping both feed straight back into the bitrate budget: cut a ten-minute
+clip to thirty seconds and the same 10 MB buys roughly twenty times the bitrate.
+Crop a 16:9 clip to a square and there are fewer pixels to fill, so the
+resolution it can hold goes up.
 
-So the editor isn't a separate tool bolted on. It's a quality dial.
+It shows the resolution you'll actually get, in green when the source survives
+intact and amber when it has to come down. Drag the trim handles wider and watch
+it flip. So the editor isn't a separate tool bolted on — it's a quality dial.
 
 The target size and codec live in here too, starting from whatever the main
-window says and overridable for this one video. That way **Compress** is never a
+window says and overridable for this one video, so **Compress** is never a
 mystery about what you're about to get.
 
 </td>
@@ -153,6 +153,29 @@ Three things turn that arithmetic into a result you can rely on:
 
 Newer codecs hold up at lower bitrates, so switching codec also changes when
 downscaling kicks in — H.265 and AV1 stay sharp well below where H.264 gives up.
+
+## Long videos don't run away with themselves
+
+<table>
+<tr>
+<td width="46%" valign="top">
+<img src="docs/screenshot-long.png" alt="A 34 minute video held back, with an amber note explaining that squeezing all of it into 10 MB would look poor" width="100%">
+</td>
+<td valign="top">
+
+Anything over twenty minutes doesn't start compressing on its own.
+
+Squeezing half an hour into 10 MB is a long wait for something unwatchable, and
+it's almost never what you meant — usually you wanted one moment out of it. So it
+says so, and hands you three ways out: trim a section, switch to **No limit**, or
+start it anyway.
+
+Pasted links still **download** as normal. Only the compression waits, so you
+land in the editor with a real file in front of you.
+
+</td>
+</tr>
+</table>
 
 ## Settings
 
