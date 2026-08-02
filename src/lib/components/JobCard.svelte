@@ -218,7 +218,25 @@
     </div>
   </div>
 
-  {#if waiting}
+  {#if waiting && job.heldReason === "browser"}
+    <!-- Held for safety, not because of length: any web page can fire the
+         protocol, so nothing from outside starts on its own by default. -->
+    <p class="hold calm">
+      <svg viewBox="0 0 24 24" aria-hidden="true"
+        ><path
+          d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+          stroke="currentColor"
+          stroke-width="1.7"
+          fill="none"
+          stroke-linejoin="round"
+        /></svg
+      >
+      <span>
+        Sent from your browser. Links from outside wait for you — press play to
+        start, or turn it on in settings.
+      </span>
+    </p>
+  {:else if waiting}
     <p class="hold">
       <svg viewBox="0 0 24 24" aria-hidden="true"
         ><path
@@ -413,6 +431,16 @@
     flex-shrink: 0;
     margin-top: 1px;
     color: var(--warn);
+  }
+
+  /* Not a warning — just an explanation of why it's waiting. */
+  .hold.calm {
+    background: rgba(88, 101, 242, 0.1);
+    color: rgba(180, 190, 255, 0.92);
+  }
+
+  .hold.calm svg {
+    color: var(--blurple-bright);
   }
 
   .meta {

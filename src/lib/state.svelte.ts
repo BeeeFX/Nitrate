@@ -46,6 +46,16 @@ class AppStore {
   editingId = $state<string | null>(null);
   /** Transient message, for things the user should know but needn't act on. */
   notice = $state<string | null>(null);
+  /**
+   * Whether a link sent from the browser starts downloading by itself.
+   *
+   * Off by default. Registering a protocol means *any* web page can fire it,
+   * not only the extension, so the safe default is to queue it visibly and
+   * wait for a click.
+   */
+  browserLinksAutoStart = $state(false);
+  /** True until the walkthrough has been seen. */
+  showTour = $state(false);
 
   #store: Store | null = null;
 
@@ -93,6 +103,17 @@ class AppStore {
     // Anything passed on the command line — "Open with", or a file dropped
     // onto the shortcut — is waiting in Rust until now.
     await this.#drainPendingFiles();
+    await this.#drainPendingLinks();
+  }
+
+  dismissTour() {
+    this.showTour = false;
+    void this.persist();
+  }
+
+  async setBrowserLinksAutoStart(value: boolean) {
+    this.browserLinksAutoStart = value;
+    await this.persist();
   }
 
   async #drainPendingFiles() {
@@ -113,6 +134,10 @@ class AppStore {
       if (typeof auto === "boolean") this.autoStart = auto;
       const pinned = await this.#store.get<boolean>("pinned");
       if (typeof pinned === "boolean") this.pinned = pinned;
+      const links = await this.#store.get<boolean>("browserLinksAutoStart");
+      if (typeof links === "boolean") this.browserLinksAutoStart = links;
+      // Absent means this is a first run, which is exactly when the tour helps.
+      this.showTour = (await this.#store.get<boolean>("tourSeen")) !== true;
     } catch {
       // First run, or the store is unreadable — defaults are fine.
     }
@@ -124,6 +149,8 @@ class AppStore {
       await this.#store.set("settings", $state.snapshot(this.settings));
       await this.#store.set("autoStart", this.autoStart);
       await this.#store.set("pinned", this.pinned);
+      await this.#store.set("browserLinksAutoStart", this.browserLinksAutoStart);
+      await this.#store.set("tourSeen", !this.showTour);
       await this.#store.save();
     } catch {
       // Losing preferences isn't worth interrupting the user over.
@@ -219,6 +246,10 @@ class AppStore {
     // A second launch hands its files to this instance rather than opening
     // a rival copy.
     await listen("files://open", () => void this.#drainPendingFiles());
+
+    // Links arriving from the browser extension.
+    await listen("links://open", () => void this.#drainPendingLinks());
+    await listen<string>("links://refused", ({ payload }) => this.#say(payload));
 
     await listen<{ id: string }>("job://cancelled", ({ payload }) => {
       const job = this.#find(payload.id);
@@ -321,6 +352,7 @@ class AppStore {
       passedThrough: false,
       knownDuration: null,
       settings: null,
+      heldReason: null,
     };
   }
 
@@ -337,8 +369,21 @@ class AppStore {
     return (job.knownDuration ?? 0) > LONG_VIDEO_SECONDS;
   }
 
+  /** Drains links that arrived from a browser via `nitrate://`. */
+  async #drainPendingLinks() {
+    try {
+      const links = await invoke<string[]>("take_pending_links");
+      for (const url of links) {
+        // A link from outside only starts by itself if that was asked for.
+        await this.addUrl(url, { autoStart: this.browserLinksAutoStart });
+      }
+    } catch {
+      // Nothing waiting.
+    }
+  }
+
   /** Queues a pasted link. The fetch itself happens on a worker thread. */
-  async addUrl(url: string) {
+  async addUrl(url: string, opts?: { autoStart?: boolean }) {
     const trimmed = url.trim();
     if (this.jobs.some((j) => j.url === trimmed && j.status !== "done")) return;
 
@@ -361,7 +406,14 @@ class AppStore {
 
       // Long recordings download as normal — `start` sees the duration and
       // stops before compressing, leaving a file ready to trim.
-      if (this.autoStart) await this.start(id);
+      const auto = opts?.autoStart ?? this.autoStart;
+      if (auto) {
+        await this.start(id);
+      } else {
+        job.status = "held";
+        job.heldReason = "browser";
+        job.stage = "Sent from your browser";
+      }
     } catch (err) {
       job.status = "failed";
       job.stage = "Failed";
@@ -415,6 +467,7 @@ class AppStore {
         // Nothing to fetch for a local file, so a long one simply waits.
         if (this.#shouldHoldBack(job)) {
           job.status = "held";
+          job.heldReason = "long";
           job.stage = "Waiting for you";
           continue;
         }
@@ -470,6 +523,7 @@ class AppStore {
     if (!job) return;
 
     job.status = "queued";
+    job.heldReason = null;
     job.stage = "Waiting…";
     job.progress = 0;
     job.error = null;

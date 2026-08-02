@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nitrate",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "app.nitrate.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -44,6 +44,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["nitrate"]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/BeeeFX/Nitrate/releases/latest/download/latest.json"

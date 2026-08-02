@@ -1,6 +1,7 @@
 //! Nitrate — compress any video to fit a target file size.
 
 // Public so the integration tests can drive the encoder without a running app.
+pub mod deeplink;
 pub mod download;
 pub mod encode;
 pub mod ffmpeg;
@@ -44,6 +45,10 @@ pub struct AppState {
     /// Files named on the command line, held until the webview is ready to
     /// receive them. Launching via "Open with" beats the frontend to startup.
     pending_files: Mutex<Vec<String>>,
+    /// Same, for `nitrate://` links arriving from a browser.
+    pending_links: Mutex<Vec<String>>,
+    /// Caps how fast links can arrive, since any page can fire the protocol.
+    link_limit: Mutex<deeplink::RateLimit>,
     /// Set when something asked for the window before the UI had painted.
     show_on_ready: Arc<AtomicBool>,
     /// Set while a native dialog is open or the window is pinned, so the
@@ -402,6 +407,61 @@ fn files_from_args<I: Iterator<Item = String>>(args: I) -> Vec<String> {
         .collect()
 }
 
+/// Picks out `nitrate://` links. Windows hands a protocol activation to the
+/// app as an ordinary command-line argument, so this is the same path that
+/// "Open with" already uses.
+fn links_from_args<I: Iterator<Item = String>>(args: I) -> Vec<String> {
+    args.skip(1)
+        .filter(|arg| arg.starts_with(deeplink::SCHEME))
+        .collect()
+}
+
+/// Hands over links that arrived while the UI wasn't ready.
+#[tauri::command]
+fn take_pending_links(state: State<'_, AppState>) -> Vec<String> {
+    std::mem::take(&mut *state.pending_links.lock().unwrap())
+}
+
+/// Validates a batch of raw `nitrate://` strings and queues what survives.
+///
+/// Returns the first complaint, if any, so the UI can say why something was
+/// ignored rather than silently dropping it.
+fn accept_links(app: &AppHandle, raw: Vec<String>) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+
+    let state = app.state::<AppState>();
+    let mut complaint = None;
+    let mut accepted = Vec::new();
+
+    for candidate in raw {
+        // Rate limiting comes first: a page firing links in a loop shouldn't
+        // get to do the parsing work either.
+        if !state.link_limit.lock().unwrap().allow() {
+            complaint.get_or_insert(deeplink::Rejected::TooMany.message().to_string());
+            break;
+        }
+
+        match deeplink::parse(&candidate) {
+            Ok(link) => accepted.push(link.url),
+            Err(why) => {
+                complaint.get_or_insert(why.message().to_string());
+            }
+        }
+    }
+
+    if !accepted.is_empty() {
+        state.pending_links.lock().unwrap().extend(accepted);
+        let _ = app.emit("links://open", ());
+        // Always surface the window. Even on the automatic setting, something
+        // arriving from a web page should never happen out of sight.
+        tray::show_popup(app, None);
+    }
+
+    complaint
+}
+
 fn fast_hash(s: &str) -> u64 {
     // FNV-1a — good enough to name a cache file.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -694,9 +754,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // A second launch should hand its files to the running instance
-            // and surface the window, not open a rival copy.
-            let files = files_from_args(argv.into_iter());
+            // A second launch should hand its payload to the running instance
+            // and surface the window, not open a rival copy. A browser firing
+            // `nitrate://` arrives here too, as an ordinary argument.
+            let files = files_from_args(argv.iter().cloned());
             if !files.is_empty() {
                 app.state::<AppState>()
                     .pending_files
@@ -705,8 +766,14 @@ pub fn run() {
                     .extend(files);
                 let _ = app.emit("files://open", ());
             }
+
+            if let Some(complaint) = accept_links(app, links_from_args(argv.into_iter())) {
+                let _ = app.emit("links://refused", complaint);
+            }
+
             tray::show_popup(app, None);
         }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
@@ -722,6 +789,8 @@ pub fn run() {
             cancels: Mutex::new(HashMap::new()),
             queue: tx,
             pending_files: Mutex::new(files_from_args(std::env::args())),
+            pending_links: Mutex::new(Vec::new()),
+            link_limit: Mutex::new(deeplink::RateLimit::default()),
             show_on_ready: Arc::new(AtomicBool::new(false)),
             suppress_hide: Arc::clone(&suppress_hide),
         })
@@ -735,6 +804,7 @@ pub fn run() {
             hide_window,
             quit_app,
             take_pending_files,
+            take_pending_links,
             frontend_ready,
             inspect_url,
             frame_at,
@@ -752,6 +822,28 @@ pub fn run() {
                 .map(|n| (n.get() / 4).clamp(1, 3))
                 .unwrap_or(1);
             spawn_workers(app.handle().clone(), rx, workers);
+
+            // A link the app was launched *with*, before any window existed.
+            let startup_links = links_from_args(std::env::args());
+            if let Some(complaint) = accept_links(app.handle(), startup_links) {
+                let _ = app.handle().emit("links://refused", complaint);
+            }
+
+            // Registering at runtime covers development, where the installer
+            // hasn't written the registry entry.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register(deeplink::SCHEME);
+
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    let raw: Vec<String> = event.urls().iter().map(|u| u.to_string()).collect();
+                    if let Some(complaint) = accept_links(&handle, raw) {
+                        let _ = handle.emit("links://refused", complaint);
+                    }
+                });
+            }
 
             // Sites change constantly, so a downloader left alone goes stale.
             // Off the main thread and silent about failure — there's nobody to

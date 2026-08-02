@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     AUDIO_BITRATES,
     AUDIO_CODECS,
@@ -19,6 +20,7 @@
   let allowedContainers = $derived(containersFor(s.videoCodec));
   let allowedAudio = $derived(audioCodecsFor(s.container));
   let hwAvailable = $derived((app.caps?.hardwareEncoders.length ?? 0) > 0);
+  const EXTENSION_URL = "https://github.com/BeeeFX/Nitrate#browser-extension";
   // Each encoder has its own effort scale, so the options change with it.
   let presets = $derived(presetsFor(s.videoCodec, s.hardware));
 
@@ -270,6 +272,35 @@
         The ceiling on what gets fetched. Pulling 4K only to squeeze it into a
         few megabytes wastes time and bandwidth.
       </p>
+    </div>
+
+    <!-- Browser extension -->
+    <div class="group">
+      <div class="group-label">Browser extension</div>
+
+      <p class="hint">
+        Puts a <b>Send to Nitrate</b> button on YouTube, X, Instagram, Reddit and
+        Twitch, so you don't have to copy the link at all.
+      </p>
+      <button class="linkish" onclick={() => openUrl(EXTENSION_URL)}>
+        Get the extension →
+      </button>
+
+      <label class="toggle-row">
+        <span class="toggle-text">
+          <span class="row-label">Start links automatically</span>
+          <span class="sub">
+            Off, a link from your browser waits for a click. On, it downloads
+            straight away — but any web page can trigger this, not just the
+            extension.
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={app.browserLinksAutoStart}
+          onchange={(e) => app.setBrowserLinksAutoStart(e.currentTarget.checked)}
+        />
+      </label>
     </div>
 
     <!-- Behaviour -->

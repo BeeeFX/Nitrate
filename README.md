@@ -154,6 +154,53 @@ Three things turn that arithmetic into a result you can rely on:
 Newer codecs hold up at lower bitrates, so switching codec also changes when
 downscaling kicks in — H.265 and AV1 stay sharp well below where H.264 gives up.
 
+## Browser extension
+
+Skips the copying entirely: a **Send to Nitrate** button appears on YouTube, X,
+Instagram, Reddit and Twitch, and there's a right-click entry that works on any
+link anywhere.
+
+Grab `nitrate-extension-chrome-*.zip` or `nitrate-extension-firefox-*.zip` from
+[Releases](https://github.com/BeeeFX/Nitrate/releases/latest).
+
+<details>
+<summary><b>Chrome / Edge — load unpacked</b></summary>
+
+1. Unzip it somewhere permanent — Chrome loads it from that folder every start
+2. Go to `chrome://extensions`, turn on **Developer mode**
+3. **Load unpacked**, pick the unzipped folder
+
+</details>
+
+<details>
+<summary><b>Firefox — temporary install</b></summary>
+
+1. Go to `about:debugging#/runtime/this-firefox`
+2. **Load Temporary Add-on**, pick the zip
+3. Temporary add-ons are removed when Firefox restarts; the store listing will
+   fix that once it's through review
+
+</details>
+
+The extension holds no permission to read pages on its own and collects nothing.
+All it does is hand a URL to the app through a `nitrate://` link.
+
+### A note on how that link works
+
+Registering a URL scheme means **any web page can fire it**, not only this
+extension — the OS routes by scheme, not by sender, and a secret baked into an
+extension is readable by anyone who unzips it. There's no way around that.
+
+So the app doesn't trust the caller. Instead it:
+
+- accepts only `http` and `https`, never `file:`, `data:` or anything else
+- **refuses loopback, LAN and link-local addresses**, so a hostile page can't use
+  the downloader to probe your router or a service on localhost
+- rate-limits arrivals, so nothing can flood the queue
+- always shows the window, so nothing is ever queued out of sight
+- **waits for a click by default.** There's a setting to start links
+  automatically, and it's off deliberately
+
 ## Long videos don't run away with themselves
 
 <table>

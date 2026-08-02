@@ -123,6 +123,11 @@ export interface Job {
    */
   knownDuration: number | null;
   /**
+   * Why a held job is waiting. The two reasons need different explanations —
+   * one is about length, the other about where the link came from.
+   */
+  heldReason: "long" | "browser" | null;
+  /**
    * Per-video overrides set in the editor. Null means "whatever the main
    * interface says", so changing the target there still moves everything that
    * hasn't been given its own answer.

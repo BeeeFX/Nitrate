@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Send to Nitrate",
+  "version": "0.3.0",
+  "description": "Send a video link to the Nitrate desktop app with one click, instead of copying and pasting it.",
+  "homepage_url": "https://github.com/BeeeFX/Nitrate",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nitrate@beeefx.github.io",
+      "strict_min_version": "121.0"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_title": "Send this page to Nitrate",
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "background": {
+    "scripts": ["src/background.js"],
+    "type": "module"
+  },
+  "permissions": ["contextMenus", "scripting", "activeTab"],
+  "content_scripts": [
+    {
+      "js": ["src/content.js"],
+      "run_at": "document_idle",
+      "matches": [
+        "https://*.youtube.com/*",
+        "https://youtu.be/*",
+        "https://*.twitter.com/*",
+        "https://*.x.com/*",
+        "https://*.instagram.com/*",
+        "https://*.reddit.com/*",
+        "https://*.twitch.tv/*"
+      ]
+    }
+  ]
+}

@@ -8,6 +8,7 @@
   import JobCard from "./lib/components/JobCard.svelte";
   import TargetPicker from "./lib/components/TargetPicker.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
+  import Tour from "./lib/components/Tour.svelte";
   import UpdateBanner from "./lib/components/UpdateBanner.svelte";
   import { app } from "./lib/state.svelte";
   import { updater } from "./lib/updater.svelte";
@@ -86,6 +87,10 @@
 
 <main class="shell" class:busy={app.busy} bind:this={shell}>
   <div class="ambient" aria-hidden="true"></div>
+
+  {#if app.ready && app.showTour}
+    <Tour />
+  {/if}
 
   <TitleBar {settingsOpen} onToggleSettings={() => (settingsOpen = !settingsOpen)} />
 

@@ -12,6 +12,10 @@ src-tauri/binaries/
 # Generated from assets/icon.svg by `npm run icons`
 assets/icon.png
 
+# Built by `npm run extension`
+extension/dist/
+extension/icons/
+
 # `tauri icon` always emits mobile variants; this is a desktop-only app
 src-tauri/icons/android/
 src-tauri/icons/ios/
