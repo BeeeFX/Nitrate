@@ -21,10 +21,10 @@
       icon: "link",
     },
     {
-      title: "Skip the copying",
-      body: "There's a browser extension that puts a Send to Nitrate button on those sites, so you don't have to copy the URL at all.",
+      title: "Skip the copying, soon",
+      body: "A browser extension is on the way that puts a Send to Nitrate button straight on those sites. It's waiting to be approved by the Chrome and Firefox stores — the link will go up on GitHub as soon as it is.",
       icon: "puzzle",
-      action: { label: "How to install it", url: EXTENSION_URL },
+      action: { label: "Follow along on GitHub", url: EXTENSION_URL },
     },
   ];
 

@@ -113,13 +113,7 @@ jobs:
             gh release delete-asset "${{ github.ref_name }}" "$asset" --yes
           done
 
-      # Platform-independent, so only one job in the matrix builds it.
-      - name: Attach the browser extension
-        if: matrix.platform == 'windows-latest'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          npm run extension
-          gh release upload "${{ github.ref_name }}" \
-            extension/dist/nitrate-extension-*.zip --clobber
+      # The extension is deliberately not attached here. It's distributed
+      # through the Chrome and Firefox stores, and a loose zip on the release
+      # page would only invite people to sideload a stale copy that never
+      # auto-updates. Build one for a store submission with `npm run extension`.

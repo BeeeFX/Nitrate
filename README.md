@@ -160,30 +160,20 @@ Skips the copying entirely: a **Send to Nitrate** button appears on YouTube, X,
 Instagram, Reddit and Twitch, and there's a right-click entry that works on any
 link anywhere.
 
-Grab `nitrate-extension-chrome-*.zip` or `nitrate-extension-firefox-*.zip` from
-[Releases](https://github.com/BeeeFX/Nitrate/releases/latest).
-
-<details>
-<summary><b>Chrome / Edge — load unpacked</b></summary>
-
-1. Unzip it somewhere permanent — Chrome loads it from that folder every start
-2. Go to `chrome://extensions`, turn on **Developer mode**
-3. **Load unpacked**, pick the unzipped folder
-
-</details>
-
-<details>
-<summary><b>Firefox — temporary install</b></summary>
-
-1. Go to `about:debugging#/runtime/this-firefox`
-2. **Load Temporary Add-on**, pick the zip
-3. Temporary add-ons are removed when Firefox restarts; the store listing will
-   fix that once it's through review
-
-</details>
+> ### ⏳ In review
+>
+> The extension is with the **Chrome Web Store** and **Firefox Add-ons** at the
+> moment, waiting to be approved. **Install links will be posted here as soon as
+> they're through.**
+>
+> Nothing else is needed — the app already understands everything the extension
+> sends, so it'll work the moment the extension lands.
 
 The extension holds no permission to read pages on its own and collects nothing.
 All it does is hand a URL to the app through a `nitrate://` link.
+
+In the meantime, pasting a link with <kbd>Ctrl</kbd>+<kbd>V</kbd> does the same
+job with one extra step.
 
 ### A note on how that link works
 

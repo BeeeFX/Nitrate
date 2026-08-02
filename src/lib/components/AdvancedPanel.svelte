@@ -280,10 +280,12 @@
 
       <p class="hint">
         Puts a <b>Send to Nitrate</b> button on YouTube, X, Instagram, Reddit and
-        Twitch, so you don't have to copy the link at all.
+        Twitch, so you don't have to copy the link at all. It's with the Chrome
+        and Firefox stores now, waiting to be approved — the link will go up on
+        GitHub as soon as it's through.
       </p>
       <button class="linkish" onclick={() => openUrl(EXTENSION_URL)}>
-        Get the extension →
+        Check for it on GitHub →
       </button>
 
       <label class="toggle-row">

@@ -3,7 +3,13 @@
 Everything to paste into the Chrome Web Store and Firefox AMO forms, in roughly
 the order each asks for it.
 
-**Packages** — from [the latest release](https://github.com/BeeeFX/Nitrate/releases/latest):
+**Packages** — build them yourself, they aren't attached to releases:
+
+```bash
+npm run extension
+```
+
+That writes both into `extension/dist/`:
 
 | Store | Upload |
 | --- | --- |
@@ -12,6 +18,10 @@ the order each asks for it.
 
 They are **not interchangeable** — Chrome wants a service worker, Firefox wants
 background scripts and a fixed add-on id.
+
+They're kept off the release page on purpose: a loose zip only invites people to
+sideload a copy that never auto-updates, which is the problem the stores exist to
+solve.
 
 **Artwork** — in this folder:
 
