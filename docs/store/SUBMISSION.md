@@ -30,6 +30,13 @@ solve.
 | `icon-128.png` | Store icon, both stores |
 | `promo-1280x800.png` | Screenshot slot (Chrome requires at least one) |
 | `tile-440x280.png` | Chrome small promo tile |
+| `marquee-1400x560.png` | Chrome marquee, shown across the top of the listing |
+
+The three promo images are **24-bit PNG with no alpha channel**, which Chrome
+insists on and silently rejects otherwise. If you regenerate them, keep the
+`.flatten()` call in the render — without it sharp emits RGBA and the upload
+fails with an unhelpful error. The icon may keep its alpha; only the promo slots
+care.
 
 ---
 
@@ -101,6 +108,10 @@ _See "Better screenshots" at the end — a real one is worth adding once you've
 installed it._
 
 **Small promo tile:** `tile-440x280.png`
+
+**Marquee promo tile:** `marquee-1400x560.png`
+_Optional, but it's what Chrome uses if the extension is ever featured, and it
+fills the banner at the top of the listing page._
 
 **Homepage URL / Support URL**
 

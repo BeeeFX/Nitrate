@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 560" width="1400" height="560">
+  <defs>
+    <radialGradient id="marqueeGlow" cx="34%" cy="46%" r="66%">
+      <stop offset="0%" stop-color="#5865F2" stop-opacity="0.40"/>
+      <stop offset="100%" stop-color="#5865F2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Opaque throughout: the marquee slot rejects anything with alpha. -->
+  <rect width="1400" height="560" fill="#0B0C12"/>
+  <rect width="1400" height="560" fill="url(#marqueeGlow)"/>
+
+  <!-- App mark, from the icon's own geometry so the proportions match -->
+  <g transform="translate(314.3, 194.3) scale(0.1674)">
+    <rect x="64" y="64" width="896" height="896" rx="232" fill="#5865F2"/>
+    <g stroke="#FFFFFF" stroke-width="76" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <polyline points="348,300 512,414 676,300"/>
+      <polyline points="348,724 512,610 676,724"/>
+    </g>
+    <rect x="336" y="478" width="352" height="68" rx="34" fill="#FFFFFF"/>
+  </g>
+
+  <text x="515" y="268" fill="#EDEEF4"
+        font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
+        font-size="60" font-weight="700" letter-spacing="-0.5">Send to Nitrate</text>
+
+  <text x="517" y="314" fill="#9BA0B4"
+        font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
+        font-size="25">Video links straight to your desktop — no copying, no pasting.</text>
+
+  <g font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19"
+     font-weight="600" fill="#9BA0B4">
+    <g transform="translate(517, 350)">
+      <rect width="118" height="44" rx="14" fill="#FFFFFF" fill-opacity="0.06"/>
+      <text x="59" y="28" text-anchor="middle">YouTube</text>
+    </g>
+    <g transform="translate(645, 350)">
+      <rect width="62" height="44" rx="14" fill="#FFFFFF" fill-opacity="0.06"/>
+      <text x="31" y="28" text-anchor="middle">X</text>
+    </g>
+    <g transform="translate(717, 350)">
+      <rect width="128" height="44" rx="14" fill="#FFFFFF" fill-opacity="0.06"/>
+      <text x="64" y="28" text-anchor="middle">Instagram</text>
+    </g>
+    <g transform="translate(855, 350)">
+      <rect width="96" height="44" rx="14" fill="#FFFFFF" fill-opacity="0.06"/>
+      <text x="48" y="28" text-anchor="middle">Reddit</text>
+    </g>
+    <g transform="translate(961, 350)">
+      <rect width="94" height="44" rx="14" fill="#FFFFFF" fill-opacity="0.06"/>
+      <text x="47" y="28" text-anchor="middle">Twitch</text>
+    </g>
+  </g>
+</svg>
