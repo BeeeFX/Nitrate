@@ -52,6 +52,20 @@
   const croppedW = $derived(crop ? Math.round(sourceW * crop.width) : sourceW);
   const croppedH = $derived(crop ? Math.round(sourceH * crop.height) : sourceH);
 
+  /**
+   * The preview box is given the video's own shape, as a plain number so the
+   * stylesheet can do arithmetic with it.
+   *
+   * It can't be left to the media's intrinsic size: a percentage max-height
+   * resolves to nothing against a parent whose height is set by its own
+   * content, so a tall video kept its full height and the box cut the bottom
+   * off. See the `.preview` rule for why the fit is computed rather than
+   * clamped.
+   */
+  const mediaRatio = $derived(
+    sourceW > 0 && sourceH > 0 ? sourceW / sourceH : 16 / 9,
+  );
+
   // This video's own compression settings, which start as whatever the main
   // interface says and can be changed here without affecting anything else.
   const settings = $derived(app.settingsFor(job));
@@ -356,7 +370,11 @@
   </header>
 
   <div class="stage">
-    <div class="preview" bind:this={previewEl}>
+    <div
+      class="preview"
+      bind:this={previewEl}
+      style:--media-ratio={mediaRatio}
+    >
       {#if videoSrc}
         <!-- svelte-ignore a11y_media_has_caption -->
         <video
@@ -662,15 +680,28 @@
     display: grid;
     place-items: center;
     padding: 12px 14px;
+    /* Makes the stage a query container so the preview can size itself from
+       both of its dimensions. Safe here because the stage's own size comes from
+       the flex row above it, never from what's inside it. */
+    container-type: size;
   }
 
-  /* Sized to the media exactly, because the crop rectangle is positioned
-     against it — any padding here would offset the crop. */
+  /*
+   * Sized to the media exactly, because the crop rectangle is positioned
+   * against it — any padding here would offset the crop.
+   *
+   * The fit is computed rather than clamped. max-width/max-height don't manage
+   * it: once a width is stated, clamping the height doesn't send the constraint
+   * back through the ratio, so the box stretches and the video is cut off —
+   * measured in this same engine, where every aspect came back the identical
+   * stretched size. The container-query units give both of the stage's
+   * dimensions, so the width can be the smaller of "all of it" and "as much as
+   * the height allows", which is the fit itself rather than an approximation.
+   */
   .preview {
     position: relative;
-    display: inline-block;
-    max-width: 100%;
-    max-height: 100%;
+    aspect-ratio: var(--media-ratio, 1.7778);
+    width: min(100cqw, calc(100cqh * var(--media-ratio, 1.7778)));
     line-height: 0;
     border-radius: var(--radius);
     overflow: hidden;
@@ -681,10 +712,11 @@
   .preview img,
   .preview video {
     display: block;
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
+    width: 100%;
+    height: 100%;
+    /* The box already has the media's shape, so this only ever matters if the
+       dimensions were unreadable — letterboxing beats stretching. */
+    object-fit: contain;
     user-select: none;
   }
 
@@ -692,11 +724,13 @@
     display: none;
   }
 
+  /* Fills the box rather than setting its own size, which would fight the
+     aspect ratio and overflow the stage while the first frame is read. */
   .frame-loading {
     display: grid;
     place-items: center;
-    width: 520px;
-    height: 292px;
+    width: 100%;
+    height: 100%;
     font-size: 12px;
     color: var(--text-faint);
   }
