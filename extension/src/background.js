@@ -46,17 +46,9 @@ chrome.action.onClicked.addListener(async (tab) => {
   await deliver(tab?.url, tab?.id);
 });
 
-// Inline buttons live in the page, which can't reach the protocol handler
-// through a sandboxed content script reliably — so they ask us instead.
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== "nitrate:send") return;
-  deliver(message.url, sender.tab?.id).then(
-    () => sendResponse({ ok: true }),
-    (error) => sendResponse({ ok: false, error: String(error) }),
-  );
-  // Keeps the channel open for the async reply.
-  return true;
-});
+// The inline buttons don't come through here — a content script can navigate
+// to the protocol itself, and asking the background to inject a script would
+// need host permissions that being listed in `content_scripts` doesn't grant.
 
 async function deliver(url, tabId) {
   if (!isSendable(url)) {

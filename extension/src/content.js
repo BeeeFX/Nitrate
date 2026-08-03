@@ -112,14 +112,26 @@ function makeButton(getUrl) {
     event.stopPropagation();
 
     const url = getUrl();
-    button.classList.add("is-busy");
+    let ok = false;
 
-    chrome.runtime.sendMessage({ type: "nitrate:send", url }, (reply) => {
-      button.classList.remove("is-busy");
-      const ok = !chrome.runtime.lastError && reply?.ok;
-      button.classList.add(ok ? "is-done" : "is-failed");
-      setTimeout(() => button.classList.remove("is-done", "is-failed"), 1600);
-    });
+    // Fired from here rather than by asking the background to inject a script.
+    //
+    // Being listed in `content_scripts` does not grant host permissions, and
+    // `activeTab` is only granted after a gesture on the extension's own UI —
+    // a button injected into the page isn't that. So `scripting.executeScript`
+    // against this tab is refused. Navigating is something the content script
+    // can already do, and needs no permission at all.
+    try {
+      if (/^https?:\/\//i.test(url)) {
+        window.location.href = `nitrate://add?url=${encodeURIComponent(url)}`;
+        ok = true;
+      }
+    } catch {
+      ok = false;
+    }
+
+    button.classList.add(ok ? "is-done" : "is-failed");
+    setTimeout(() => button.classList.remove("is-done", "is-failed"), 1600);
   });
 
   return button;
