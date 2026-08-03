@@ -302,6 +302,7 @@ const COPIED = [
   "font-family",
   "font-size",
   "font-weight",
+  "line-height",
   "letter-spacing",
   "color",
 ];
@@ -318,11 +319,20 @@ function adoptStyle(button, row) {
   const candidates = Array.from(row.querySelectorAll?.("button") ?? []).filter(
     (candidate) => !candidate.hasAttribute(MARK),
   );
-  // A labelled pill, so the padding and font come from a button shaped like
-  // ours rather than from the round overflow menu at the end of the row.
+  if (!candidates.length) return;
+
+  // Not just any button in the row. The like/dislike pair is a single segmented
+  // control, so each half computes a border-radius rounded on one side only —
+  // "20px 0px 0px 20px" — and copying that would give a button flat down one
+  // edge. A uniform radius has no spaces in it, which rules them both out.
+  // Preferring one with a label then gets the padding and font from a button
+  // shaped like ours rather than from the round overflow menu.
+  const uniform = (candidate) =>
+    !window.getComputedStyle(candidate).borderRadius.trim().includes(" ");
   const reference =
-    candidates.find((candidate) => candidate.textContent?.trim()) ?? candidates[0];
-  if (!reference) return;
+    candidates.find((c) => c.textContent?.trim() && uniform(c)) ??
+    candidates.find(uniform) ??
+    candidates[0];
 
   const style = window.getComputedStyle(reference);
   for (const property of COPIED) {
@@ -524,6 +534,12 @@ function injectStyles() {
       justify-content: center;
       gap: 6px;
       box-sizing: border-box;
+      position: relative;
+      /* Never shrink. These rows are flex containers whose children are free to
+         compress, so an extra button gets squeezed and its background is cut
+         short — the label overflows past a pill that stops early. */
+      flex: 0 0 auto;
+      white-space: nowrap;
       border: none;
       background: rgba(128,128,128,.16);
       color: inherit;
@@ -565,17 +581,31 @@ function injectStyles() {
      * when the variables have been renamed out from under us.
      */
     .nitrate-send[data-site="youtube"] {
-      height: 36px;
-      padding: 0 16px 0 12px;
+      height: 40px;
+      padding: 0 16px;
       margin: 0 0 0 8px;
-      gap: 6px;
-      border-radius: 18px;
+      gap: 0;
+      border-radius: 20px;
       background: var(--yt-spec-badge-chip-background, rgba(255,255,255,.1));
       color: var(--yt-spec-text-primary, #f1f1f1);
       font-family: "Roboto", "Arial", sans-serif;
       font-size: 14px;
       font-weight: 500;
-      letter-spacing: .25px;
+      letter-spacing: normal;
+    }
+    /*
+     * The rim light. YouTube draws it with a <yt-light-shape> child element
+     * whose ::before carries this gradient — a white wash across the top that's
+     * gone three-quarters of the way down. It reads as a lit top edge, and its
+     * absence is why the button looked flat next to Share.
+     */
+    .nitrate-send[data-site="youtube"]::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background-image: linear-gradient(rgba(255,255,255,.1), rgba(0,0,0,0) 75%);
+      pointer-events: none;
     }
     .nitrate-send[data-site="youtube"]:hover {
       background: var(--yt-spec-button-chip-background-hover, rgba(255,255,255,.2));
@@ -586,12 +616,18 @@ function injectStyles() {
      * That also means it works whichever theme the copied colour came from.
      */
     .nitrate-send[data-nitrate-adopted]:hover { filter: brightness(1.4); }
-    .nitrate-send[data-site="youtube"]:not(:has(.nitrate-label)) { width: 36px; padding: 0; }
-    /* Monochrome, like Share and Save beside it — the word carries the brand. */
+    .nitrate-send[data-site="youtube"]:not(:has(.nitrate-label)) { width: 40px; padding: 0; }
+    .nitrate-send[data-site="youtube"]:not(:has(.nitrate-label)) .nitrate-icon { margin: 0; }
+    /*
+     * Monochrome, like Share and Save beside it — the word carries the brand.
+     * The negative left margin is YouTube's: it pulls the icon back out of the
+     * 16px padding so a leading icon sits at 10px while the text keeps its 16.
+     */
     .nitrate-send[data-site="youtube"] .nitrate-icon {
       width: 24px;
       height: 24px;
       color: currentColor;
+      margin: 0 6px 0 -6px;
     }
     .nitrate-send[data-site="youtube"].is-done .nitrate-icon { color: #43B581; }
     .nitrate-send[data-site="youtube"].is-failed .nitrate-icon { color: #ED4245; }
