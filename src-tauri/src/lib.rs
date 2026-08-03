@@ -283,6 +283,16 @@ fn allow_preview(app: AppHandle, path: String) -> Result<String, String> {
     Ok(path)
 }
 
+/// Says the title bar has been pressed, so any movement now is a drag.
+///
+/// The window can't tell one from the other on its own: the same event arrives
+/// whether the user dragged it or the app repositioned it. See
+/// `tray::note_drag_start`.
+#[tauri::command]
+fn window_drag_started() {
+    tray::note_drag_start();
+}
+
 /// Plays a finished video in whatever the system uses for it.
 ///
 /// Done here rather than with the plugin's `openPath` from the frontend, which
@@ -840,6 +850,7 @@ pub fn run() {
             set_editor_size,
             allow_preview,
             open_video,
+            window_drag_started,
         ])
         .setup(move |app| {
             tray::setup(app.handle(), Arc::clone(&suppress_hide))?;

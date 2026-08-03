@@ -1,9 +1,11 @@
 //! Tray icon and the popup-window behaviour that hangs off it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::utils::config::WindowEffectsConfig;
+use tauri::window::{Effect, EffectState};
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Rect, WebviewWindow, WindowEvent,
 };
@@ -62,7 +64,84 @@ fn attach_popup_behaviour(window: &WebviewWindow, suppress_hide: Arc<AtomicBool>
         WindowEvent::Focused(false) if !suppress_hide.load(Ordering::Relaxed) => {
             let _ = w.hide();
         }
+        WindowEvent::Moved(_) => suspend_acrylic_while_moving(&w),
         _ => {}
+    });
+}
+
+/// Counts moves so the restore can tell "still dragging" from "stopped".
+static MOVE_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Whether the backdrop is currently switched off for a drag.
+static ACRYLIC_OFF: AtomicBool = AtomicBool::new(false);
+/// Set while the title bar is held down, cleared once the window settles.
+static DRAGGING: AtomicBool = AtomicBool::new(false);
+
+/// How long the window has to sit still before the backdrop comes back.
+const SETTLE_MS: u64 = 180;
+
+/// Exactly what `tauri.conf.json` asks for, so what comes back is what was
+/// there before the drag rather than an approximation of it.
+fn acrylic() -> WindowEffectsConfig {
+    WindowEffectsConfig {
+        effects: vec![Effect::Acrylic],
+        state: Some(EffectState::Active),
+        radius: None,
+        color: None,
+    }
+}
+
+/// Marks the start of a drag, called when the title bar is pressed.
+///
+/// Nothing is switched off here — a press that never becomes a drag should
+/// change nothing at all. It only says that any movement arriving now is the
+/// user's doing.
+pub fn note_drag_start() {
+    DRAGGING.store(true, Ordering::Relaxed);
+}
+
+/// Turns the acrylic backdrop off while the window is being dragged.
+///
+/// Windows draws acrylic through an undocumented composition attribute that
+/// makes dragging crawl on some machines — the window trails the cursor and
+/// then catches up once you stop, which is exactly the report this came from.
+/// It depends on the GPU and the Windows build, so plenty of machines never see
+/// it, and this one couldn't reproduce it.
+///
+/// So the backdrop goes away for the duration of the drag and comes back as
+/// soon as the window settles. Standing still it looks exactly as before, which
+/// is the only time anyone is looking at the blur anyway.
+///
+/// Only user drags count. The app moves this window itself — anchoring it to
+/// the tray on open, pulling it back on screen after the editor resizes it —
+/// and dropping the backdrop for those would make it blink on every open.
+fn suspend_acrylic_while_moving(window: &WebviewWindow) {
+    if !DRAGGING.load(Ordering::Relaxed) {
+        return;
+    }
+
+    MOVE_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    // Already off: the watcher below is running and will see the newer count.
+    if ACRYLIC_OFF.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    let _ = window.set_effects(None);
+
+    // One thread per drag rather than per move — moves arrive far too fast to
+    // be worth a timer each.
+    let w = window.clone();
+    std::thread::spawn(move || {
+        loop {
+            let seen = MOVE_SEQ.load(Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
+            if MOVE_SEQ.load(Ordering::Relaxed) == seen {
+                break;
+            }
+        }
+        let _ = w.set_effects(acrylic());
+        DRAGGING.store(false, Ordering::Relaxed);
+        ACRYLIC_OFF.store(false, Ordering::Relaxed);
     });
 }
 

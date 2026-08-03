@@ -12,10 +12,30 @@
   function togglePin() {
     void app.setPinned(!app.pinned);
   }
+
+  /**
+   * Tells the backend a drag may be starting.
+   *
+   * The window sees the same move event whether the user dragged it or the app
+   * repositioned it, and it needs to tell them apart — one is worth dropping
+   * the acrylic backdrop for, the other would make it blink on every open.
+   *
+   * Fires on the bar itself, so pressing a button up there doesn't count.
+   */
+  function noteDragStart(event: PointerEvent) {
+    const target = event.target as HTMLElement | null;
+    if (!target?.hasAttribute("data-tauri-drag-region")) return;
+    void invoke("window_drag_started").catch(() => {});
+  }
 </script>
 
 <!-- data-tauri-drag-region makes the bar behave like a native title bar,
      which the window needs since it's drawn without decorations. -->
+<!-- Listened for on the window rather than the bar: a press anywhere in a drag
+     region counts, and a header isn't an interactive element to hang a pointer
+     handler off. -->
+<svelte:window onpointerdown={noteDragStart} />
+
 <header class="bar" data-tauri-drag-region>
   <div class="brand" data-tauri-drag-region>
     <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
