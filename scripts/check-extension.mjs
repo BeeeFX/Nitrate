@@ -28,7 +28,7 @@ function makeElement(tag = "div") {
   const element = {
     tagName: tag.toUpperCase(),
     dataset: {},
-    style: {},
+    style: { setProperty() {}, removeProperty() {} },
     children: [],
     parentElement: null,
     innerHTML: "",
@@ -41,6 +41,8 @@ function makeElement(tag = "div") {
     },
     setAttribute() {},
     getAttribute: () => null,
+    hasAttribute: () => false,
+    closest: () => null,
     addEventListener() {},
     removeEventListener() {},
     appendChild(child) {
@@ -83,7 +85,13 @@ function makeSandbox(hostname, pathname) {
     sandbox: {
       document,
       location: { hostname, pathname, href: `https://${hostname}${pathname}`, origin: `https://${hostname}` },
-      window: { addEventListener() {}, location: { href: "" } },
+      window: {
+      addEventListener() {},
+      location: { href: "" },
+      // Returns nothing useful on purpose: the style-adoption path has to cope
+      // with a reference button it can't measure.
+      getComputedStyle: () => ({ getPropertyValue: () => "", backgroundColor: "" }),
+    },
       console: {
         info: (...args) => logs.push(args.join(" ")),
         warn: (...args) => logs.push(args.join(" ")),

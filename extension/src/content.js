@@ -15,14 +15,22 @@ const LOG = "[Nitrate]";
 const START = Date.now();
 const FALLBACK_DELAY = 4000;
 
+// Site navigation looks exactly like an action row to a structural search —
+// Instagram's sidebar is a tall column of labelled icons, same as a reel's
+// rail — so it's ruled out by role rather than left to lose on size.
+const CHROME = "nav, header, aside, [role='navigation'], [role='banner']";
+
+// Drawn at 24px with 2px strokes, which is what these sites' own icon sets use
+// — a heavier mark reads as a logo dropped into the row rather than a control
+// belonging to it.
 const MARK_SVG = `
 <svg class="nitrate-icon" viewBox="0 0 24 24" aria-hidden="true">
-  <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
+  <g stroke="currentColor" stroke-width="2" stroke-linecap="round"
      stroke-linejoin="round" fill="none">
     <polyline points="7,5 12,9 17,5"/>
     <polyline points="7,19 12,15 17,19"/>
   </g>
-  <rect x="6" y="11" width="12" height="2.4" rx="1.2" fill="currentColor"/>
+  <rect x="6" y="11" width="12" height="2" rx="1" fill="currentColor"/>
 </svg>`;
 
 /**
@@ -42,6 +50,9 @@ const SITES = [
     matches: () => /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(location.hostname),
     scope: null,
     label: true,
+    // Take the real pills' measurements instead of hardcoding them; see
+    // `adoptStyle`.
+    copyStyle: true,
     anchors: [
       "ytd-watch-metadata #top-level-buttons-computed",
       // The like/dislike pill is the one element in that row with a name that
@@ -103,7 +114,11 @@ const SITES = [
     // to, search the page and let the structural pass find that rail.
     scope: () => {
       const articles = Array.from(document.querySelectorAll("article"));
-      return articles.length ? articles : [document.body];
+      if (articles.length) return articles;
+      // A reel has no article, and searching the whole page finds the left
+      // navigation first — Home/Reels/Search/Profile is also a tall column of
+      // labelled icons. `main` holds the reel and not the sidebar.
+      return [document.querySelector("main") ?? document.body];
     },
     label: false,
     anchors: [],
@@ -196,7 +211,9 @@ function findActionCluster(root) {
   const scope = root === document ? document.body : root;
   if (!scope?.querySelectorAll) return null;
 
-  const icons = Array.from(scope.querySelectorAll("svg[aria-label], svg[role='img']"));
+  const icons = Array.from(
+    scope.querySelectorAll("svg[aria-label], svg[role='img']"),
+  ).filter((icon) => !icon.closest?.(CHROME));
   if (icons.length < 3) return null;
 
   const counts = new Map();
@@ -245,6 +262,67 @@ function findAnchor(root) {
   return cluster ? { node: cluster, placement: "append" } : null;
 }
 
+/**
+ * Copies a neighbouring button's own computed style onto ours.
+ *
+ * Every hardcoded guess at YouTube's pill — height, radius, padding, the exact
+ * grey — is a guess that goes stale the next time they adjust it, and it can't
+ * be right for both themes at once anyway. Reading it off the Share button
+ * sitting next to us is exact by construction, and stays exact.
+ *
+ * The CSS rules remain as the fallback for when no reference button is found.
+ */
+const COPIED = [
+  "height",
+  "border-radius",
+  "padding-left",
+  "padding-right",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "letter-spacing",
+  "color",
+];
+
+function adoptStyle(button, row) {
+  let read;
+  try {
+    read = window.getComputedStyle;
+    if (typeof read !== "function") return;
+  } catch {
+    return;
+  }
+
+  const candidates = Array.from(row.querySelectorAll?.("button") ?? []).filter(
+    (candidate) => !candidate.hasAttribute(MARK),
+  );
+  // A labelled pill, so the padding and font come from a button shaped like
+  // ours rather than from the round overflow menu at the end of the row.
+  const reference =
+    candidates.find((candidate) => candidate.textContent?.trim()) ?? candidates[0];
+  if (!reference) return;
+
+  const style = window.getComputedStyle(reference);
+  for (const property of COPIED) {
+    const value = style.getPropertyValue(property);
+    if (value) button.style.setProperty(property, value);
+  }
+
+  // The background often sits on a wrapper rather than the button itself, so a
+  // transparent answer means "look further up", not "there isn't one".
+  let node = reference;
+  for (let depth = 0; node && depth < 4; depth += 1) {
+    const background = window.getComputedStyle(node).backgroundColor;
+    if (background && !/^(transparent|rgba\(0, 0, 0, 0\))$/.test(background)) {
+      button.style.setProperty("background-color", background);
+      break;
+    }
+    node = node.parentElement;
+  }
+
+  button.dataset.nitrateAdopted = "1";
+}
+
 function place(anchor, button, placement) {
   if (placement === "after") anchor.after(button);
   else if (placement === "prepend") anchor.prepend(button);
@@ -258,6 +336,14 @@ function scopes() {
 }
 
 function scan() {
+  // A button placed before the page finished rendering can land in the wrong
+  // group, and because a placed button stops the search it would stay there for
+  // the life of the tab. Dropping the misplaced one lets the next pass — by
+  // which time the real row exists — put it where it belongs.
+  for (const button of document.querySelectorAll(`[${MARK}]:not(.nitrate-floating)`)) {
+    if (button.closest?.(CHROME)) button.remove();
+  }
+
   for (const scope of scopes()) {
     const root = scope === document ? document : scope;
     // The floating button has to be excluded here. It lives on `body`, so on a
@@ -265,7 +351,13 @@ function scan() {
     // short-circuits — meaning if the fallback ever appears before the action
     // row has rendered, it wins permanently and the inline button never
     // arrives. That's timing-dependent, which is why it came and went.
-    if (root.querySelector?.(`[${MARK}]:not(.nitrate-floating)`)) continue;
+    if (root.querySelector?.(`[${MARK}]:not(.nitrate-floating)`)) {
+      // Re-read on every pass: the theme switch changes the pills without
+      // replacing them, and a button placed under the old colours would
+      // otherwise keep them.
+      if (site.copyStyle) refreshStyles(root);
+      continue;
+    }
 
     const anchor = findAnchor(root);
     if (!anchor) continue;
@@ -281,9 +373,18 @@ function scan() {
       placement = "prepend";
     }
     place(anchor.node, button, placement);
+    // After placing, so the reference button is measured in its final context.
+    if (site.copyStyle) adoptStyle(button, button.parentElement ?? anchor.node);
   }
 
   ensureFallback();
+}
+
+function refreshStyles(root) {
+  const buttons = root.querySelectorAll?.(`[${MARK}]:not(.nitrate-floating)`) ?? [];
+  for (const button of buttons) {
+    if (button.parentElement) adoptStyle(button, button.parentElement);
+  }
 }
 
 /**
@@ -442,6 +543,12 @@ function injectStyles() {
     .nitrate-send[data-site="youtube"]:hover {
       background: var(--yt-spec-button-chip-background-hover, rgba(255,255,255,.2));
     }
+    /*
+     * An adopted background is an inline style, which no rule here can outrank
+     * — so the hover lightens what's already there instead of replacing it.
+     * That also means it works whichever theme the copied colour came from.
+     */
+    .nitrate-send[data-nitrate-adopted]:hover { filter: brightness(1.4); }
     .nitrate-send[data-site="youtube"]:not(:has(.nitrate-label)) { width: 36px; padding: 0; }
     /* Monochrome, like Share and Save beside it — the word carries the brand. */
     .nitrate-send[data-site="youtube"] .nitrate-icon {
