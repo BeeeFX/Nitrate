@@ -28,9 +28,16 @@ solve.
 | File | Used for |
 | --- | --- |
 | `icon-128.png` | Store icon, both stores |
-| `promo-1280x800.png` | Screenshot slot (Chrome requires at least one) |
+| `screenshots/*.png` | The screenshot slots — five of them, in order |
+| `promo-1280x800.png` | A promotional graphic, if you'd rather lead with one |
 | `tile-440x280.png` | Chrome small promo tile |
 | `marquee-1400x560.png` | Chrome marquee, shown across the top of the listing |
+
+Regenerate the screenshots with `npm run store:shots`. They're built from the
+ones in `docs/`, centred on a dark backdrop at exactly 1280×800 with no alpha,
+which is what the store's upload accepts. The script checks both of those before
+it finishes, and refuses to run if two of the source screenshots turn out to be
+the same image.
 
 The three promo images are **24-bit PNG with no alpha channel**, which Chrome
 insists on and silently rejects otherwise. If you regenerate them, keep the
@@ -106,9 +113,9 @@ Tools
 
 **Store icon:** `icon-128.png`
 
-**Screenshots:** `promo-1280x800.png`
-_See "Better screenshots" at the end — a real one is worth adding once you've
-installed it._
+**Screenshots:** everything in `screenshots/`, uploaded in filename order
+_Five of them, which is Chrome's maximum. See "Better screenshots" at the end:
+one of the extension's own button, taken in a browser, is worth adding on top._
 
 **Small promo tile:** `tile-440x280.png`
 
@@ -291,19 +298,19 @@ No
 
 # Better screenshots
 
-Both listings currently use a promotional graphic. It satisfies the requirement,
-but a genuine screenshot is far more persuasive and reassures reviewers the
-extension does what it says.
+The five in `screenshots/` show the desktop app, which is what the extension is
+for — but none of them show the extension itself. That's the one gap worth
+filling, and it needs a browser with the extension loaded:
 
-Once you've installed it, capture:
-
-1. **A YouTube watch page** with the blurple "Nitrate" button visible in the row
-   next to Share — the single most convincing image
+1. **A YouTube watch page** with the "Nitrate" button visible in the row next to
+   Share — the single most convincing image
 2. **The right-click menu** open on a link, showing "Send link to Nitrate"
 3. Optionally **the app receiving it**, with the video queued
 
-Chrome wants 1280×800 or 640×400. Firefox is relaxed about size. Drop them in
-`docs/store/` and they'll be part of the repo.
+Chrome wants 1280×800 or 640×400, 24-bit, no alpha; Firefox is relaxed about
+size. If a capture comes out at some other size, drop it in `docs/` and add it
+to the list in `scripts/make-store-screenshots.mjs` — that handles the resizing
+and the alpha channel, which are the two things the upload rejects silently.
 
 ---
 

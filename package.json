@@ -15,6 +15,7 @@
     "bump": "node scripts/bump-version.mjs",
     "extension": "node scripts/build-extension.mjs",
     "extension:check": "node scripts/check-extension.mjs",
+    "store:shots": "node scripts/make-store-screenshots.mjs",
     "icons": "node scripts/make-icons.mjs && tauri icon assets/icon.png",
     "postinstall": "node scripts/fetch-ffmpeg.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json"
