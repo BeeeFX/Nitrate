@@ -122,9 +122,18 @@ const SITES = [
     },
     label: false,
     anchors: [],
-    resolve: (scope) => {
-      const link = scope?.querySelector?.('a[href*="/p/"], a[href*="/reel/"]');
-      return link ? new URL(link.getAttribute("href"), location.origin).href : location.href;
+    // Climbs from the rail rather than searching the scope, because on a reel
+    // feed the scope is `main` and holds several reels at once — searching it
+    // would send whichever one happens to be first in the document, not the one
+    // whose button was pressed.
+    resolve: (scope, node) => {
+      let element = node ?? scope;
+      for (let depth = 0; element && depth < 8; depth += 1) {
+        const link = element.querySelector?.('a[href*="/p/"], a[href*="/reel/"]');
+        if (link) return new URL(link.getAttribute("href"), location.origin).href;
+        element = element.parentElement;
+      }
+      return location.href;
     },
   },
 ];
@@ -200,21 +209,25 @@ function makeButton(getUrl) {
 }
 
 /**
- * Finds the action row by shape instead of by name.
+ * Finds action rows by shape instead of by name.
  *
  * Every one of these sites groups its controls into one small box holding
- * several labelled icons, so the smallest element containing at least three of
- * them is the row — or, on a reel, the vertical rail. That survives a rename,
- * which is what the selectors above keep failing to do.
+ * several labelled icons, so an element containing at least three of them is a
+ * row — or, on a reel, the vertical rail. That survives a rename, which is what
+ * the selectors above keep failing to do.
+ *
+ * Returns every such group rather than the best one: a reel feed keeps several
+ * reels alive at once, each with its own rail, and stopping at the first meant
+ * the button stayed behind on the reel you'd just scrolled past.
  */
-function findActionCluster(root) {
+function findActionClusters(root) {
   const scope = root === document ? document.body : root;
-  if (!scope?.querySelectorAll) return null;
+  if (!scope?.querySelectorAll) return [];
 
   const icons = Array.from(
     scope.querySelectorAll("svg[aria-label], svg[role='img']"),
   ).filter((icon) => !icon.closest?.(CHROME));
-  if (icons.length < 3) return null;
+  if (icons.length < 3) return [];
 
   const counts = new Map();
   for (const icon of icons) {
@@ -225,21 +238,31 @@ function findActionCluster(root) {
     }
   }
 
-  let best = null;
+  const candidates = [];
   for (const [node, count] of counts) {
     if (count < 3) continue;
-    if (node.querySelector(`[${MARK}]`)) continue;
     const rect = node.getBoundingClientRect?.();
     if (!rect || !rect.width || !rect.height) continue;
-    const area = rect.width * rect.height;
-    if (!best || area < best.area) best = { node, area, rect };
+    candidates.push({ node, rect, area: rect.width * rect.height });
+  }
+  // Smallest first, so the row itself is preferred over everything wrapping it.
+  candidates.sort((a, b) => a.area - b.area);
+
+  const chosen = [];
+  for (const candidate of candidates) {
+    // One per group: anything containing an already-chosen row, or contained by
+    // one, is the same set of buttons seen from a different level.
+    const overlaps = chosen.some(
+      (other) => other.node.contains(candidate.node) || candidate.node.contains(other.node),
+    );
+    if (overlaps) continue;
+    // A rail is taller than it is wide; the button stacks rather than sits beside.
+    candidate.node.dataset.nitrateOrientation =
+      candidate.rect.height > candidate.rect.width * 1.5 ? "column" : "row";
+    chosen.push(candidate);
   }
 
-  if (!best) return null;
-  // A rail is taller than it is wide; the button wants to stack, not sit beside.
-  best.node.dataset.nitrateOrientation =
-    best.rect.height > best.rect.width * 1.5 ? "column" : "row";
-  return best.node;
+  return chosen.map((c) => c.node);
 }
 
 function findAnchor(root) {
@@ -258,8 +281,7 @@ function findAnchor(root) {
     if (node) return { node, placement: placement ?? "append" };
   }
 
-  const cluster = findActionCluster(root);
-  return cluster ? { node: cluster, placement: "append" } : null;
+  return null;
 }
 
 /**
@@ -346,38 +368,53 @@ function scan() {
 
   for (const scope of scopes()) {
     const root = scope === document ? document : scope;
-    // The floating button has to be excluded here. It lives on `body`, so on a
-    // page with no scope it counts as "already done" and every later scan
-    // short-circuits — meaning if the fallback ever appears before the action
-    // row has rendered, it wins permanently and the inline button never
-    // arrives. That's timing-dependent, which is why it came and went.
-    if (root.querySelector?.(`[${MARK}]:not(.nitrate-floating)`)) {
-      // Re-read on every pass: the theme switch changes the pills without
-      // replacing them, and a button placed under the old colours would
-      // otherwise keep them.
-      if (site.copyStyle) refreshStyles(root);
+    const anchor = findAnchor(root);
+
+    if (anchor) {
+      // The floating button has to be excluded here. It lives on `body`, so on
+      // a page with no scope it counts as "already done" and every later scan
+      // short-circuits — meaning if the fallback ever appears before the action
+      // row has rendered, it wins permanently and the inline button never
+      // arrives. That's timing-dependent, which is why it came and went.
+      if (root.querySelector?.(`[${MARK}]:not(.nitrate-floating)`)) {
+        // Re-read on every pass: the theme switch changes the pills without
+        // replacing them, and a button placed under the old colours would
+        // otherwise keep them.
+        if (site.copyStyle) refreshStyles(root);
+        continue;
+      }
+      attach(anchor.node, scope, anchor.placement);
       continue;
     }
 
-    const anchor = findAnchor(root);
-    if (!anchor) continue;
-
-    const button = makeButton(() => site.resolve(scope === document ? null : scope));
-
-    // On a rail the button goes at the top, above the like control. Appending
-    // would drop it under the account avatar at the foot of the column, which
-    // is both the least reachable spot and visually part of a different group.
-    let placement = anchor.placement;
-    if (anchor.node.dataset?.nitrateOrientation === "column") {
-      button.classList.add("nitrate-stacked");
-      placement = "prepend";
+    // No named anchor, so fall back to shape. Each group is handled on its own
+    // — checking the scope as a whole would leave every reel after the first
+    // one bare, since they share `main`.
+    for (const cluster of findActionClusters(root)) {
+      if (cluster.querySelector?.(`[${MARK}]`)) continue;
+      attach(cluster, scope);
     }
-    place(anchor.node, button, placement);
-    // After placing, so the reference button is measured in its final context.
-    if (site.copyStyle) adoptStyle(button, button.parentElement ?? anchor.node);
   }
 
   ensureFallback();
+}
+
+/** Builds a button for one anchor and puts it in place. */
+function attach(node, scope, placement) {
+  const button = makeButton(() => site.resolve(scope === document ? null : scope, node));
+
+  // On a rail the button goes at the top, above the like control. Appending
+  // would drop it under the account avatar at the foot of the column, which is
+  // both the least reachable spot and visually part of a different group.
+  let where = placement ?? "append";
+  if (node.dataset?.nitrateOrientation === "column") {
+    button.classList.add("nitrate-stacked");
+    where = "prepend";
+  }
+
+  place(node, button, where);
+  // After placing, so the reference button is measured in its final context.
+  if (site.copyStyle) adoptStyle(button, button.parentElement ?? node);
 }
 
 function refreshStyles(root) {
