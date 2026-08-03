@@ -242,6 +242,7 @@ function findAnchor(root) {
 
 function place(anchor, button, placement) {
   if (placement === "after") anchor.after(button);
+  else if (placement === "prepend") anchor.prepend(button);
   else anchor.appendChild(button);
 }
 
@@ -260,10 +261,16 @@ function scan() {
     if (!anchor) continue;
 
     const button = makeButton(() => site.resolve(scope === document ? null : scope));
+
+    // On a rail the button goes at the top, above the like control. Appending
+    // would drop it under the account avatar at the foot of the column, which
+    // is both the least reachable spot and visually part of a different group.
+    let placement = anchor.placement;
     if (anchor.node.dataset?.nitrateOrientation === "column") {
       button.classList.add("nitrate-stacked");
+      placement = "prepend";
     }
-    place(anchor.node, button, anchor.placement);
+    place(anchor.node, button, placement);
   }
 
   ensureFallback();
@@ -389,18 +396,43 @@ function injectStyles() {
     /* No label means a circle, not a stubby pill. */
     .nitrate-send:not(:has(.nitrate-label)) { width: 32px; padding: 0; }
 
-    /* A rail rather than a row: full width of the column, stacked under it. */
-    .nitrate-send.nitrate-stacked { margin: 12px auto 0; display: flex; }
+    /* A rail rather than a row: sits above the like control, spaced like one. */
+    .nitrate-send.nitrate-stacked { display: flex; margin: 0 auto 16px; }
 
-    /* YouTube's action row is 36px pills with 14px text. */
+    /*
+     * YouTube: not "close to" its pills but the same pills.
+     *
+     * The colours come from YouTube's own custom properties rather than fixed
+     * values, so the button follows the theme switch for free — including the
+     * pages that force one theme regardless of the account setting. The
+     * fallbacks are the dark-theme values, since that's what these are set to
+     * when the variables have been renamed out from under us.
+     */
     .nitrate-send[data-site="youtube"] {
       height: 36px;
-      padding: 0 14px;
-      margin-left: 8px;
-      font: 500 14px/1 "Roboto", Arial, sans-serif;
+      padding: 0 16px 0 12px;
+      margin: 0 0 0 8px;
+      gap: 6px;
+      border-radius: 18px;
+      background: var(--yt-spec-badge-chip-background, rgba(255,255,255,.1));
+      color: var(--yt-spec-text-primary, #f1f1f1);
+      font-family: "Roboto", "Arial", sans-serif;
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: .25px;
+    }
+    .nitrate-send[data-site="youtube"]:hover {
+      background: var(--yt-spec-button-chip-background-hover, rgba(255,255,255,.2));
     }
     .nitrate-send[data-site="youtube"]:not(:has(.nitrate-label)) { width: 36px; padding: 0; }
-    .nitrate-send[data-site="youtube"] .nitrate-icon { width: 18px; height: 18px; }
+    /* Monochrome, like Share and Save beside it — the word carries the brand. */
+    .nitrate-send[data-site="youtube"] .nitrate-icon {
+      width: 24px;
+      height: 24px;
+      color: currentColor;
+    }
+    .nitrate-send[data-site="youtube"].is-done .nitrate-icon { color: #43B581; }
+    .nitrate-send[data-site="youtube"].is-failed .nitrate-icon { color: #ED4245; }
 
     /* Instagram's controls are bare outline icons on the page background. */
     .nitrate-send[data-site="instagram"] {

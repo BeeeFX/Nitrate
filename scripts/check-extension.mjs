@@ -47,6 +47,10 @@ function makeElement(tag = "div") {
       element.children.push(child);
       return child;
     },
+    prepend(child) {
+      element.children.unshift(child);
+      return child;
+    },
     after() {},
     remove() {},
     querySelector: () => null,
