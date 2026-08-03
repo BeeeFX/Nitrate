@@ -132,8 +132,11 @@ pub fn resize_popup(app: &AppHandle, expanded: bool) {
         if let Ok(grown) = window.outer_size() {
             let dx = grown.width as i32 - size.width as i32;
             let dy = grown.height as i32 - size.height as i32;
-            let x = if keep_right { position.x - dx } else { position.x };
-            let y = if keep_bottom { position.y - dy } else { position.y };
+            // Shifting by the growth keeps the far edge still; shifting by zero
+            // keeps the near one. Written this way round because the branches
+            // are then short enough to stay on one line.
+            let x = position.x - if keep_right { dx } else { 0 };
+            let y = position.y - if keep_bottom { dy } else { 0 };
             let _ = window.set_position(PhysicalPosition::new(x, y));
         }
     }
