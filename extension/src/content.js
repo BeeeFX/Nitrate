@@ -32,8 +32,12 @@ const SITES = [
     scope: null,
     anchors: [
       "ytd-watch-metadata #top-level-buttons-computed",
+      "ytd-watch-metadata #actions-inner",
+      "ytd-watch-metadata #actions",
       "#top-level-buttons-computed",
       "ytd-menu-renderer #top-level-buttons-computed",
+      "#actions-inner",
+      "#actions",
     ],
     resolve: () => location.href,
   },
@@ -89,11 +93,15 @@ const site = SITES.find((s) => {
   }
 });
 
-if (site) {
-  injectStyles();
-  scheduleScan();
-  observe();
-}
+// A single line on load, so "nothing happened" can be told apart from "never
+// ran". Without it, a missed selector and a script that was never injected look
+// identical from the outside — which is exactly the case that needs diagnosing,
+// given these selectors are expected to rot.
+const LOG = "[Nitrate]";
+
+// Startup lives at the very bottom of this file, after every declaration has
+// been evaluated. Calling it from up here would work for the hoisted function
+// declarations but not for the `let` bindings they close over.
 
 // ---------------------------------------------------------------------------
 
@@ -185,6 +193,13 @@ function ensureFallback() {
   }
   if (existing) return;
 
+  // Worth saying out loud: it means a selector has rotted, and knowing which
+  // site is most of the work of fixing it.
+  console.info(
+    `${LOG} no anchor matched on ${site.id} — using the floating button. ` +
+      `Tried: ${site.anchors.join(", ")}`,
+  );
+
   const button = makeButton(() => location.href);
   button.classList.add("nitrate-floating");
   document.body?.appendChild(button);
@@ -193,6 +208,7 @@ function ensureFallback() {
 // SPA navigation and infinite feeds both mean the DOM never settles, so the
 // scan is debounced rather than run per mutation.
 let pending = 0;
+
 function scheduleScan() {
   clearTimeout(pending);
   pending = setTimeout(() => {
@@ -243,4 +259,17 @@ function injectStyles() {
     }
   `;
   (document.head || document.documentElement).appendChild(style);
+}
+
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+
+if (site) {
+  console.info(`${LOG} active on ${site.id}`);
+  injectStyles();
+  scheduleScan();
+  observe();
+} else {
+  console.info(`${LOG} loaded, but ${location.hostname} isn't a supported site`);
 }
