@@ -564,7 +564,16 @@
           {#if job.plan.mode === "quality"}
             <span>quality {settings.quality}</span>
             <span class="sep">·</span>
-            <span class="target">size not fixed</span>
+            {#if job.plan.estimatedBytes}
+              <span
+                class="target estimate"
+                title="A rough guess from the quality setting and the frame size. Busy footage runs larger, still footage smaller."
+              >
+                ≈{formatSize(job.plan.estimatedBytes)}
+              </span>
+            {:else}
+              <span class="target">size not fixed</span>
+            {/if}
           {:else}
             <span>{formatBitrate(job.plan.videoKbps)}</span>
             <span class="sep">·</span>
@@ -991,6 +1000,13 @@
 
   .target {
     color: var(--text-dim);
+  }
+
+  /* Dotted underline: the number is a guess, and it should look like one. */
+  .estimate {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+    cursor: help;
   }
 
   .compress {

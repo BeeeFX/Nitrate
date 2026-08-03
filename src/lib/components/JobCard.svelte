@@ -134,8 +134,15 @@
             <span class="dot">·</span>
             {#if job.plan.mode === "quality"}
               <!-- No bitrate budget exists in quality mode, so quoting one
-                   would just be a misleading zero. -->
+                   would just be a misleading zero. The estimate stands in for
+                   it: without one there's nothing here to suggest the size. -->
               <span>{settings.quality} quality</span>
+              {#if job.plan.estimatedBytes}
+                <span class="dot">·</span>
+                <span class="estimate" title="A rough guess from the quality setting and the frame size. Busy footage runs larger, still footage smaller.">
+                  ≈{formatSize(job.plan.estimatedBytes)}
+                </span>
+              {/if}
             {:else}
               <span>{formatBitrate(job.plan.videoKbps)}</span>
             {/if}
@@ -487,6 +494,13 @@
   .to {
     color: var(--success);
     font-weight: 650;
+  }
+
+  /* Dotted underline: the number is a guess, and it should look like one. */
+  .estimate {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+    cursor: help;
   }
 
   .saved {

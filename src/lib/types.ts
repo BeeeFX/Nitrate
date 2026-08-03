@@ -26,6 +26,8 @@ export interface Plan {
   fps: number;
   encoder: string;
   downscaled: boolean;
+  /** Quality mode only — roughly what it will come out at. */
+  estimatedBytes: number | null;
   notes: string[];
 }
 

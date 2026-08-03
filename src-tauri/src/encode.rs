@@ -274,7 +274,53 @@ pub struct Plan {
     pub fps: f64,
     pub encoder: String,
     pub downscaled: bool,
+    /// Roughly what quality mode will produce. `None` when a size was asked
+    /// for, since that answer is already the target.
+    pub estimated_bytes: Option<u64>,
     pub notes: Vec<String>,
+}
+
+/// Bits per pixel at a reference CRF, per encoder family.
+///
+/// Constant-quality encoding has no size to report until it's done, so this is
+/// the only way to answer "how big will it be" before running it. Each family
+/// gets an anchor — a CRF and the bits per pixel it lands near on ordinary
+/// footage — and the scale between anchors is the usual rule that six points of
+/// CRF halves the bitrate.
+///
+/// It is genuinely an estimate. A static talking head and a snowstorm at the
+/// same CRF differ by several times over, and nothing short of encoding can
+/// tell them apart, which is why the number is shown with a "≈".
+fn reference_bpp(codec: VideoCodec) -> (f64, f64) {
+    match codec {
+        VideoCodec::H264 => (23.0, 0.085),
+        VideoCodec::H265 => (28.0, 0.060),
+        VideoCodec::Vp9 => (32.0, 0.060),
+        VideoCodec::Av1 => (35.0, 0.045),
+    }
+}
+
+fn estimate_quality_bytes(
+    codec: VideoCodec,
+    crf: u32,
+    width: u32,
+    height: u32,
+    fps: f64,
+    audio_kbps: u32,
+    duration: f64,
+) -> Option<u64> {
+    if duration <= 0.0 || width == 0 || height == 0 {
+        return None;
+    }
+
+    let (reference_crf, reference) = reference_bpp(codec);
+    let bpp = reference * 2f64.powf((reference_crf - crf as f64) / 6.0);
+
+    let fps = if fps > 0.0 { fps } else { 30.0 };
+    let video_bps = bpp * width as f64 * height as f64 * fps;
+    let total_bps = video_bps + audio_kbps as f64 * 1000.0;
+
+    Some((total_bps * duration / 8.0) as u64)
 }
 
 /// Standard heights we're willing to step down through.
@@ -414,6 +460,8 @@ pub fn plan(
         fps,
         encoder,
         downscaled: height < source_height,
+        // The target is the estimate in this mode.
+        estimated_bytes: None,
         notes,
     })
 }
@@ -484,6 +532,11 @@ fn plan_by_quality(
     if height < source_height {
         notes.push(format!("Capped at {height}p."));
     }
+    notes.push(
+        "The estimated size is a guess from the quality setting and frame size; \
+         busy footage runs larger and still footage smaller."
+            .into(),
+    );
 
     let audio_kbps = if info.has_audio() && settings.audio_codec != AudioCodec::None {
         match settings.audio_codec {
@@ -496,7 +549,15 @@ fn plan_by_quality(
         0
     };
 
-    let _ = edits;
+    let estimated_bytes = estimate_quality_bytes(
+        settings.video_codec,
+        crf,
+        width,
+        height,
+        fps,
+        audio_kbps,
+        edits.duration(info.duration),
+    );
 
     Ok(Plan {
         mode: TargetMode::Quality,
@@ -508,6 +569,7 @@ fn plan_by_quality(
         fps,
         encoder,
         downscaled: height < source_height,
+        estimated_bytes,
         notes,
     })
 }

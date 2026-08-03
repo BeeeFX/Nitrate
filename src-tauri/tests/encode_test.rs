@@ -353,6 +353,73 @@ fn quality_mode_encodes_without_a_size_target() {
         "quality mode has no ceiling, so it should never retry"
     );
 
+    // The estimate is a model, not a measurement, so this checks it's the right
+    // order of magnitude rather than the right number. Anything outside a
+    // factor of four is a broken model rather than unusual footage — and a
+    // wildly wrong figure on the card is worse than none, since the whole point
+    // is to give someone a rough idea before they commit to the encode.
+    let estimate = plan
+        .estimated_bytes
+        .expect("quality mode should estimate a size");
+    let ratio = estimate as f64 / outcome.final_bytes as f64;
+    assert!(
+        (0.25..=4.0).contains(&ratio),
+        "estimated {estimate} bytes but encoded {} — off by {ratio:.1}x",
+        outcome.final_bytes
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_size_estimate_tracks_the_quality_setting() {
+    let dir = temp_dir("estimate-scale");
+    let input = make_clip(&dir, "input.mp4", "640x360", 24, 5, 3000);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    let estimate_for = |level: QualityLevel| {
+        let mut set = settings(10_000_000, &dir);
+        set.mode = TargetMode::Quality;
+        set.quality = level;
+        encode::plan(&info, &set, &Edits::default(), &bins)
+            .expect("plan should succeed")
+            .estimated_bytes
+            .expect("quality mode should estimate a size")
+    };
+
+    let small = estimate_for(QualityLevel::Small);
+    let balanced = estimate_for(QualityLevel::Balanced);
+    let high = estimate_for(QualityLevel::High);
+
+    assert!(
+        small < balanced && balanced < high,
+        "a higher quality setting has to estimate a larger file — got {small}, \
+         {balanced}, {high}"
+    );
+
+    // Trimming halves the clip, so it should roughly halve the estimate. This
+    // catches the estimate being computed from the source duration rather than
+    // the edited one, which is the mistake that would otherwise go unnoticed.
+    let mut set = settings(10_000_000, &dir);
+    set.mode = TargetMode::Quality;
+    let edits = Edits {
+        start: Some(0.0),
+        end: Some(info.duration / 2.0),
+        ..Edits::default()
+    };
+    let trimmed = encode::plan(&info, &set, &edits, &bins)
+        .expect("plan should succeed")
+        .estimated_bytes
+        .expect("quality mode should estimate a size");
+    let full = estimate_for(QualityLevel::Balanced);
+    let ratio = trimmed as f64 / full as f64;
+    assert!(
+        (0.4..=0.6).contains(&ratio),
+        "half the clip should estimate about half the size — got {ratio:.2}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

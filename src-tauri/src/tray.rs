@@ -102,20 +102,65 @@ const EXPANDED: (f64, f64) = (760.0, 800.0);
 
 /// Grows the popup for the editor and shrinks it back afterwards.
 ///
-/// Resizing alone would happily push the window off the bottom-right of the
-/// screen, since that's where a tray-anchored popup usually sits, so the
-/// position is pulled back into view afterwards.
+/// Resizing keeps the top-left corner where it is and grows right and down,
+/// which is wrong for a window that lives against the bottom-right of the
+/// screen: the wider window then had to be pulled back on screen, and shrinking
+/// it again left it where it had been pulled to. Opening and closing the editor
+/// therefore walked the popup a few hundred pixels away from the tray.
+///
+/// So the edges nearest the screen edges are the ones held still. That's the
+/// bottom-right for a taskbar in its usual place, the top-left on a monitor
+/// where the window sits up there, and it returns to exactly the original
+/// position when the size goes back.
 pub fn resize_popup(app: &AppHandle, expanded: bool) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+
+    let before = window
+        .outer_position()
+        .ok()
+        .zip(window.outer_size().ok())
+        .zip(anchor_corner(&window));
 
     let (w, h) = if expanded { EXPANDED } else { COMPACT };
     if window.set_size(LogicalSize::new(w, h)).is_err() {
         return;
     }
 
+    if let Some(((position, size), (keep_right, keep_bottom))) = before {
+        if let Ok(grown) = window.outer_size() {
+            let dx = grown.width as i32 - size.width as i32;
+            let dy = grown.height as i32 - size.height as i32;
+            let x = if keep_right { position.x - dx } else { position.x };
+            let y = if keep_bottom { position.y - dy } else { position.y };
+            let _ = window.set_position(PhysicalPosition::new(x, y));
+        }
+    }
+
     clamp_into_monitor(&window);
+}
+
+/// Which corner of the window to hold still through a resize: the one closest
+/// to the corner of the screen it's sitting in.
+fn anchor_corner(window: &WebviewWindow) -> Option<(bool, bool)> {
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())?;
+
+    let area = monitor.size();
+    let origin = monitor.position();
+    let centre_x = position.x + size.width as i32 / 2;
+    let centre_y = position.y + size.height as i32 / 2;
+
+    Some((
+        centre_x > origin.x + area.width as i32 / 2,
+        centre_y > origin.y + area.height as i32 / 2,
+    ))
 }
 
 /// Nudges the window back on screen after a resize.
