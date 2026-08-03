@@ -132,7 +132,13 @@
               {job.plan.height}p
             </span>
             <span class="dot">·</span>
-            {#if job.plan.mode === "quality"}
+            {#if job.plan.mode === "keep"}
+              <span>{job.plan.copyStreams ? "no re-encoding" : "near-lossless"}</span>
+              {#if job.plan.estimatedBytes}
+                <span class="dot">·</span>
+                <span>≈{formatSize(job.plan.estimatedBytes)}</span>
+              {/if}
+            {:else if job.plan.mode === "quality"}
               <!-- No bitrate budget exists in quality mode, so quoting one
                    would just be a misleading zero. The estimate stands in for
                    it: without one there's nothing here to suggest the size. -->

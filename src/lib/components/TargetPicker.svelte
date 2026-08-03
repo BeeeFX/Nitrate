@@ -7,12 +7,30 @@
     onChange: (patch: Partial<Settings>) => void;
     /** The editor uses a tighter version of the same control. */
     compact?: boolean;
+    /**
+     * Size of the video this applies to, when it applies to just one.
+     *
+     * The main window's picker is a default for whatever gets dropped next, so
+     * it has no file to measure against and leaves every tier available.
+     */
+    sourceBytes?: number | null;
   }
 
-  let { settings, onChange, compact = false }: Props = $props();
+  let { settings, onChange, compact = false, sourceBytes = null }: Props = $props();
 
   const sizeMode = $derived(settings.mode === "size");
   const matched = $derived(TIERS.find((t) => t.bytes === settings.targetBytes));
+
+  /**
+   * A tier at or above the file's own size can't do anything.
+   *
+   * Asking to fit a 12 MB video into 500 MB either passes it through untouched
+   * or, once it's been cropped, re-encodes it to a target it was never near —
+   * so the option is offered but not selectable, and says why on hover.
+   */
+  function tierIsPointless(bytes: number): boolean {
+    return sourceBytes !== null && sourceBytes > 0 && sourceBytes <= bytes;
+  }
 
   let custom = $state(false);
   let customMb = $state(25);
@@ -56,9 +74,14 @@
 
   <div class="tiers">
     {#each TIERS as tier (tier.id)}
+      {@const pointless = tierIsPointless(tier.bytes)}
       <button
         class="tier"
         class:active={sizeMode && !custom && matched?.id === tier.id}
+        disabled={pointless}
+        title={pointless
+          ? `This video is already under ${tier.sub}`
+          : `Fit under ${tier.sub}`}
         onclick={() => pickTier(tier.bytes)}
       >
         <span class="tier-name">{tier.label}</span>
@@ -96,15 +119,33 @@
          the obviously right answer. -->
     <button
       class="tier flat"
-      class:active={!sizeMode}
+      class:active={settings.mode === "quality"}
       onclick={() => onChange({ mode: "quality" })}
       title="Compress well and accept whatever size results"
     >
       No limit
     </button>
+
+    <!-- For material that's already been compressed once, and for anyone who
+         only came here to crop or trim. -->
+    <button
+      class="tier flat"
+      class:active={settings.mode === "keep"}
+      onclick={() => onChange({ mode: "keep" })}
+      title="Apply the edits and leave the quality alone"
+    >
+      Don't compress
+    </button>
   </div>
 
-  {#if !sizeMode}
+  {#if settings.mode === "keep"}
+    <p class="hint">
+      Trims without re-encoding, so it's instant and loses nothing. Cropping
+      still has to re-encode, at near-lossless quality.
+    </p>
+  {/if}
+
+  {#if settings.mode === "quality"}
     <div class="quality">
       <div class="quality-row">
         {#each QUALITY_LEVELS as level (level.id)}
@@ -167,12 +208,19 @@
     padding: 6px 4px;
   }
 
-  .tier:hover {
+  .tier:hover:not(:disabled) {
     background: var(--surface-hover);
   }
 
-  .tier:active {
+  .tier:active:not(:disabled) {
     transform: scale(0.97);
+  }
+
+  /* Still legible, so it's clear the option exists and why it's unavailable —
+     the tooltip does the explaining. */
+  .tier:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
 
   .tier.active {

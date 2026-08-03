@@ -497,3 +497,154 @@ fn probe_reads_the_essentials() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn keep_mode_trims_without_re_encoding() {
+    let dir = temp_dir("keep-trim");
+    // Deliberately generous bitrate: if this were re-encoded at any sane
+    // setting the result would come out visibly smaller, which is how the test
+    // can tell a copy from an encode without inspecting ffmpeg's arguments.
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 8, 6000);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    // A target far below what a copy can possibly produce. Keep mode has to
+    // ignore it completely — if any of the size logic leaked into this path the
+    // job would either shrink the clip or fail outright.
+    let mut set = settings(500_000, &dir);
+    set.mode = TargetMode::Keep;
+
+    let edits = Edits {
+        start: Some(0.0),
+        end: Some(4.0),
+        crop: None,
+    };
+
+    let plan = encode::plan(&info, &set, &edits, &bins).expect("plan should succeed");
+    assert!(
+        plan.copy_streams,
+        "a trim alone should be copied, not encoded"
+    );
+    assert_eq!(plan.encoder, "copy");
+    assert!(plan.crf.is_none(), "a copy has no quality setting to make");
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("keep-mode trim should succeed")
+        .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    let out = ffmpeg::probe(&bins, Path::new(&outcome.output)).expect("output should probe");
+
+    assert_eq!(
+        out.width, info.width,
+        "a copy must not change the frame size"
+    );
+    assert_eq!(out.height, info.height);
+    assert!(
+        (out.duration - 4.0).abs() < 1.0,
+        "the trim should be about four seconds, got {}",
+        out.duration
+    );
+
+    // The giveaway: a copy keeps the source's bitrate, so half the clip is
+    // about half the bytes. A re-encode at any ordinary setting would be far
+    // smaller than that, and the size check below would fail.
+    let ratio = outcome.final_bytes as f64 / info.size_bytes as f64;
+    assert!(
+        (0.35..=0.65).contains(&ratio),
+        "half a copied clip should be about half the size — got {ratio:.2} \
+         ({} of {} bytes), which suggests it was re-encoded",
+        outcome.final_bytes,
+        info.size_bytes
+    );
+    assert!(
+        outcome.final_bytes > set.target_bytes,
+        "the output came in under a target keep mode was supposed to ignore \
+         ({} bytes vs {}), so the size logic reached this path",
+        outcome.final_bytes,
+        set.target_bytes
+    );
+    assert_eq!(
+        outcome.attempts, 1,
+        "a copy has nothing to verify and nothing to retry"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn keep_mode_re_encodes_when_it_has_to() {
+    let dir = temp_dir("keep-crop");
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 4, 3000);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    let mut set = settings(10_000_000, &dir);
+    set.mode = TargetMode::Keep;
+
+    // Cropping changes the pixels, so copying them is not an option.
+    let edits = Edits {
+        start: None,
+        end: None,
+        crop: Some(CropRect {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+        }),
+    };
+
+    let plan = encode::plan(&info, &set, &edits, &bins).expect("plan should succeed");
+    assert!(!plan.copy_streams, "a crop cannot be a stream copy");
+    assert!(
+        plan.crf.is_some(),
+        "the fallback is constant quality, not a bitrate target"
+    );
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("keep-mode crop should succeed")
+        .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    let out = ffmpeg::probe(&bins, Path::new(&outcome.output)).expect("output should probe");
+    assert_eq!(out.width, 640, "the crop should have halved the width");
+    assert_eq!(out.height, 360);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn keep_mode_leaves_an_unedited_file_completely_alone() {
+    let dir = temp_dir("keep-untouched");
+    // Far over any tier, to prove size plays no part in the decision.
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 6, 8000);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    let mut set = settings(1_000_000, &dir);
+    set.mode = TargetMode::Keep;
+
+    assert!(
+        encode::can_pass_through(&info, &set, &Edits::default(), &input),
+        "with nothing asked for, there is nothing to do"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

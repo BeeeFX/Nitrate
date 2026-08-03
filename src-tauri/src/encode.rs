@@ -98,6 +98,13 @@ pub enum AudioCodec {
 pub enum TargetMode {
     Size,
     Quality,
+    /// Apply the edits and change nothing else.
+    ///
+    /// A downloaded video has already been compressed once by whoever it came
+    /// from, and re-encoding it to trim off the first ten seconds only throws
+    /// away quality for nothing. Where the edits allow it the streams are
+    /// copied verbatim, which is both lossless and near-instant.
+    Keep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -277,6 +284,9 @@ pub struct Plan {
     /// Roughly what quality mode will produce. `None` when a size was asked
     /// for, since that answer is already the target.
     pub estimated_bytes: Option<u64>,
+    /// Copy the streams instead of encoding them. Only ever set in keep mode,
+    /// and only when the edits don't touch the picture.
+    pub copy_streams: bool,
     pub notes: Vec<String>,
 }
 
@@ -349,6 +359,18 @@ pub fn plan(
     // verify afterwards. Just encode it well.
     if settings.mode == TargetMode::Quality {
         return plan_by_quality(
+            info,
+            settings,
+            edits,
+            bins,
+            source_width,
+            source_height,
+            notes,
+        );
+    }
+
+    if settings.mode == TargetMode::Keep {
+        return plan_by_keeping(
             info,
             settings,
             edits,
@@ -462,6 +484,7 @@ pub fn plan(
         downscaled: height < source_height,
         // The target is the estimate in this mode.
         estimated_bytes: None,
+        copy_streams: false,
         notes,
     })
 }
@@ -570,6 +593,107 @@ fn plan_by_quality(
         encoder,
         downscaled: height < source_height,
         estimated_bytes,
+        copy_streams: false,
+        notes,
+    })
+}
+
+/// Near-lossless constant quality, for when keep mode has to re-encode anyway.
+///
+/// Cropping can't be done by copying — the frames genuinely change — so the
+/// promise becomes "you won't see the difference" rather than "nothing was
+/// touched". These sit a few points below the High preset for that reason.
+fn keep_crf(codec: VideoCodec) -> u32 {
+    match codec {
+        VideoCodec::H264 => 18,
+        VideoCodec::H265 => 22,
+        VideoCodec::Vp9 => 26,
+        VideoCodec::Av1 => 28,
+    }
+}
+
+/// Applies the edits and leaves everything else alone.
+fn plan_by_keeping(
+    info: &MediaInfo,
+    settings: &Settings,
+    edits: &Edits,
+    bins: &Binaries,
+    source_width: u32,
+    source_height: u32,
+    mut notes: Vec<String>,
+) -> Result<Plan, String> {
+    // A crop changes the pixels, so they have to be encoded again. Trimming
+    // doesn't: cutting between two points is a copy, whatever the codec.
+    let crops = edits.crop.is_some();
+    let capped = settings
+        .max_height
+        .is_some_and(|cap| cap < source_height.max(1))
+        || settings.max_fps.is_some_and(|cap| cap < info.fps);
+    let copy_streams = !crops && !capped;
+
+    let duration = edits.duration(info.duration);
+
+    if copy_streams {
+        notes.push("Copying the video across untouched — no re-encoding.".into());
+        if edits.start.is_some() || edits.end.is_some() {
+            // Worth saying plainly. Copying means the cut can only land on a
+            // keyframe, so asking for 1:03 may give you 1:01.
+            notes.push(
+                "Cuts land on the nearest keyframe before the point you chose, \
+                 which is the price of not re-encoding."
+                    .into(),
+            );
+        }
+    } else if crops {
+        notes.push("Cropping means re-encoding, so this runs at near-lossless quality.".into());
+    } else {
+        notes.push("Re-encoding at near-lossless quality to apply the caps you set.".into());
+    }
+
+    let height = settings
+        .max_height
+        .unwrap_or(source_height)
+        .min(source_height.max(1));
+    let width = scaled_width(source_width, source_height.max(1), height);
+
+    let fps = match settings.max_fps {
+        Some(cap) if cap < info.fps => cap,
+        _ => info.fps,
+    };
+
+    // Audio is never re-encoded here; there's no reason to when the point is to
+    // leave the material as it was.
+    let audio_kbps = info.audio_bitrate_kbps.unwrap_or(0);
+
+    // Copying keeps the source's own bitrate, so the size follows from how much
+    // of the clip is left. That's arithmetic rather than a guess, unlike the
+    // quality-mode estimate.
+    let estimated_bytes = if copy_streams && info.duration > 0.0 && info.size_bytes > 0 {
+        Some((info.size_bytes as f64 * (duration / info.duration)).round() as u64)
+    } else {
+        None
+    };
+
+    Ok(Plan {
+        mode: TargetMode::Keep,
+        video_kbps: 0,
+        crf: if copy_streams {
+            None
+        } else {
+            Some(keep_crf(settings.video_codec))
+        },
+        audio_kbps,
+        width,
+        height,
+        fps,
+        encoder: if copy_streams {
+            "copy".into()
+        } else {
+            pick_encoder(settings, bins, &mut notes)
+        },
+        downscaled: height < source_height,
+        estimated_bytes,
+        copy_streams,
         notes,
     })
 }
@@ -682,6 +806,21 @@ fn build_args(
         // origin and -to would be measured against the original timeline.
         args.push(s("-t"));
         args.push(format!("{:.3}", edits.duration(info.duration)));
+    }
+
+    // Keep mode with nothing to re-encode: hand both streams straight through.
+    // No filters, no codec settings, no second pass — none of it applies when
+    // the packets aren't being decoded in the first place.
+    if plan.copy_streams {
+        args.extend([s("-c"), s("copy"), s("-map"), s("0")]);
+        // Timestamps start wherever the keyframe was, and some players show a
+        // clip that begins at 0:47 as being 47 seconds long with a blank start.
+        args.extend([s("-avoid_negative_ts"), s("make_zero")]);
+        if matches!(task.settings.container, Container::Mp4) {
+            args.extend([s("-movflags"), s("+faststart")]);
+        }
+        args.push(output.to_string_lossy().into_owned());
+        return args;
     }
 
     // Crop first: everything after it works on the smaller frame.
@@ -920,8 +1059,10 @@ pub fn run_job(
     ));
 
     // Two passes exist to hit a size accurately. Constant quality has no size
-    // to hit, so the analysis pass would be pure waste.
+    // to hit, so the analysis pass would be pure waste — and a stream copy has
+    // no encoder to analyse anything with.
     let two_pass = plan.crf.is_none()
+        && !plan.copy_streams
         && settings.two_pass
         && settings.video_codec.supports_two_pass()
         && plan.encoder.starts_with("lib");
@@ -977,9 +1118,13 @@ pub fn run_job(
             .len();
 
         // Rate control aims, it doesn't promise. If we overshot, scale the
-        // bitrate by how far off we were and go again. Quality mode has no
-        // ceiling to overshoot, so whatever came out is the answer.
-        if plan.crf.is_some() || final_bytes <= settings.target_bytes || attempts >= MAX_ATTEMPTS {
+        // bitrate by how far off we were and go again. Quality and keep modes
+        // have no ceiling to overshoot, so whatever came out is the answer.
+        if plan.crf.is_some()
+            || plan.copy_streams
+            || final_bytes <= settings.target_bytes
+            || attempts >= MAX_ATTEMPTS
+        {
             break;
         }
 
@@ -993,10 +1138,10 @@ pub fn run_job(
 
     cleanup_passlog(&passlog);
 
-    // Only a failure when a size was actually being aimed at. In quality mode
-    // the target is meaningless, and judging the result against it would fail
-    // almost every encode for doing exactly what was asked.
-    if plan.crf.is_none() && final_bytes > settings.target_bytes {
+    // Only a failure when a size was actually being aimed at. In quality and
+    // keep modes the target is meaningless, and judging the result against it
+    // would fail almost every encode for doing exactly what was asked.
+    if plan.crf.is_none() && !plan.copy_streams && final_bytes > settings.target_bytes {
         return Err(format!(
             "Couldn't get under {} after {attempts} attempts (landed at {}). Try a lower resolution or a newer codec.",
             crate::format_size(settings.target_bytes),
@@ -1030,6 +1175,12 @@ pub fn can_pass_through(
     }
     if !edits.is_empty() {
         return false;
+    }
+    // Keep mode with no edits asks for nothing at all to happen, whatever the
+    // size or container — there's no target to measure against and no filter to
+    // apply, so copying the file is the complete job.
+    if settings.mode == TargetMode::Keep {
+        return true;
     }
     if info.size_bytes == 0 || info.size_bytes > settings.target_bytes {
         return false;

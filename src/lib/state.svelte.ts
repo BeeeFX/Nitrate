@@ -228,6 +228,17 @@ class AppStore {
       if (job.kind === "url") {
         job.kind = "file";
         job.path = payload.output;
+
+        // Whatever arrived has already been compressed — by the site it came
+        // from, and again here if auto-compress was on. Going back in to trim
+        // it shouldn't quietly put it through a third encode, so this one
+        // starts out set to leave the picture alone. Only a default: the
+        // picker is right there, and it isn't touched if the settings were
+        // already customised by hand.
+        if (!job.settings) {
+          job.settings = { ...this.settings, mode: "keep" };
+        }
+
         void this.refresh(job.id);
       }
     });

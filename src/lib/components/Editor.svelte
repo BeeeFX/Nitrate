@@ -77,8 +77,24 @@
       (job.info?.sizeBytes ?? 0) <= settings.targetBytes,
   );
   const dirty = $derived(isTrimmed || crop !== null);
-  // Nothing to do only when it already fits *and* hasn't been edited.
-  const canCompress = $derived(dirty || !alreadyFits);
+  // Nothing to do only when it already fits *and* hasn't been edited. In keep
+  // mode there's no compressing to do at all, so an unedited video is a no-op.
+  const canCompress = $derived(
+    settings.mode === "keep" ? dirty : dirty || !alreadyFits,
+  );
+
+  /**
+   * The button says what's about to happen.
+   *
+   * "Compress" on a job that only trims and copies would be a lie, and the
+   * difference matters: one takes a second and changes nothing, the other takes
+   * minutes and re-encodes every frame.
+   */
+  const actionLabel = $derived.by(() => {
+    if (settings.mode !== "keep") return dirty ? "Apply & compress" : "Compress";
+    if (crop !== null) return "Apply & re-encode";
+    return "Apply edits";
+  });
 
   // ---------------------------------------------------------------------
   // Preview source
@@ -547,6 +563,7 @@
       <TargetPicker
         compact
         settings={settings}
+        sourceBytes={job.info?.sizeBytes ?? null}
         onChange={(patch) => app.updateJobSettings(job.id, patch)}
       />
 
@@ -579,7 +596,13 @@
             {job.plan.width}×{job.plan.height}
           </strong>
           <span class="sep">·</span>
-          {#if job.plan.mode === "quality"}
+          {#if job.plan.mode === "keep"}
+            <span>{job.plan.copyStreams ? "no re-encoding" : "near-lossless"}</span>
+            {#if job.plan.estimatedBytes}
+              <span class="sep">·</span>
+              <span class="target">≈{formatSize(job.plan.estimatedBytes)}</span>
+            {/if}
+          {:else if job.plan.mode === "quality"}
             <span>quality {settings.quality}</span>
             <span class="sep">·</span>
             {#if job.plan.estimatedBytes}
@@ -597,6 +620,8 @@
             <span class="sep">·</span>
             <span class="target">{formatSize(settings.targetBytes)}</span>
           {/if}
+        {:else if settings.mode === "keep" && !dirty}
+          <span class="dim">Crop or trim to apply — nothing else will change</span>
         {:else if alreadyFits && !dirty}
           <span class="dim">Already under {formatSize(settings.targetBytes)}</span>
         {:else}
@@ -605,7 +630,7 @@
       </div>
 
       <button class="compress" disabled={!canCompress} onclick={compress}>
-        {dirty ? "Apply & compress" : "Compress"}
+        {actionLabel}
       </button>
     </div>
 

@@ -26,8 +26,10 @@ export interface Plan {
   fps: number;
   encoder: string;
   downscaled: boolean;
-  /** Quality mode only — roughly what it will come out at. */
+  /** Quality and keep modes — roughly what it will come out at. */
   estimatedBytes: number | null;
+  /** Keep mode: the streams are copied, so nothing is re-encoded. */
+  copyStreams: boolean;
   notes: string[];
 }
 
@@ -35,7 +37,7 @@ export type VideoCodec = "h264" | "h265" | "vp9" | "av1";
 export type Container = "mp4" | "webm" | "mkv";
 export type AudioCodec = "aac" | "opus" | "copy" | "none";
 
-export type TargetMode = "size" | "quality";
+export type TargetMode = "size" | "quality" | "keep";
 export type QualityLevel = "small" | "balanced" | "high";
 
 export interface Settings {
