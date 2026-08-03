@@ -80,6 +80,15 @@ function makeElement(tag = "div", attrs = {}) {
       element.children.unshift(child);
       return child;
     },
+    insertBefore(child, reference) {
+      const at = element.children.indexOf(reference);
+      child.parentElement = element;
+      element.children.splice(at === -1 ? element.children.length : at, 0, child);
+      return child;
+    },
+    get lastElementChild() {
+      return element.children[element.children.length - 1] ?? null;
+    },
     after(sibling) {
       const parent = element.parentElement;
       if (!parent) return;
@@ -151,6 +160,9 @@ function matchesOne(node, selector) {
     const wanted = selector.slice(7, -2);
     return node.getAttribute("role") === wanted;
   }
+  // A bare [attr="value"] selector, which is how the Twitch row is anchored.
+  const attribute = selector.match(/^\[([\w-]+)="([^"]+)"\]$/);
+  if (attribute) return node.getAttribute(attribute[1]) === attribute[2];
   // Anything else is a site-specific selector that this fixture doesn't model,
   // which is the point — the structural pass is what's under test.
   return false;
@@ -190,6 +202,41 @@ function reelFixture(body) {
   return rails;
 }
 
+/**
+ * A Twitch clip page's row of actions.
+ *
+ * Each control sits in a wrapper div, and the only named element is the
+ * "Watch Full Video" link — so the anchor has to climb two levels to reach the
+ * row, and land second from the end rather than past the overflow menu.
+ */
+function clipFixture(body) {
+  const row = makeElement("div");
+  row.rect = { width: 400, height: 32, top: 500, left: 500 };
+
+  const wrap = (child) => {
+    const wrapper = makeElement("div");
+    wrapper.appendChild(child);
+    row.appendChild(wrapper);
+    return wrapper;
+  };
+
+  const watch = makeElement("a", { "data-test-selector": "clips-watch-full-button" });
+  watch.textContent = "Watch Full Video";
+  wrap(watch);
+
+  for (const text of ["Edit", "Share"]) {
+    const button = makeElement("button");
+    button.textContent = text;
+    wrap(button);
+  }
+
+  const overflow = makeElement("button", { "aria-label": "Clip Options" });
+  wrap(overflow);
+
+  body.appendChild(row);
+  return row;
+}
+
 function makeSandbox(hostname, pathname, fixture) {
   const body = makeElement("body");
   const head = makeElement("head");
@@ -227,7 +274,11 @@ function makeSandbox(hostname, pathname, fixture) {
         location: { href: "" },
         // Deliberately useless: the style-adoption path has to cope with a
         // reference button it can't measure.
-        getComputedStyle: () => ({ getPropertyValue: () => "", backgroundColor: "" }),
+        getComputedStyle: () => ({
+          getPropertyValue: () => "",
+          backgroundColor: "",
+          borderRadius: "",
+        }),
       },
       console: {
         info: (...args) => logs.push(args.join(" ")),
@@ -324,6 +375,29 @@ async function main() {
     }
   } catch (error) {
     fail(`reel feed: ${error.message}`);
+  }
+
+  // The clip row: the anchor has to climb two levels to reach it and land
+  // before the overflow menu, not after it.
+  try {
+    const { extras: row, logs } = await run(
+      "content.js",
+      "www.twitch.tv",
+      "/ludwig/clip/Something",
+      clipFixture,
+    );
+    const index = row.children.findIndex((child) => child.hasAttribute(MARK));
+    if (index === -1) {
+      fail("clip row: no button was placed");
+    } else if (index !== row.children.length - 2) {
+      fail(`clip row: button landed at ${index} of ${row.children.length}, wanted second from the end`);
+    } else if (logs.some((line) => line.includes("floating button"))) {
+      fail("clip row: fell back to the corner button despite finding the row");
+    } else {
+      console.log("  ok    clip row: button sits before the overflow menu");
+    }
+  } catch (error) {
+    fail(`clip row: ${error.message}`);
   }
 
   try {

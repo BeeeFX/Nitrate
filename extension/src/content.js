@@ -37,8 +37,9 @@ const MARK_SVG = `
  * Per-site strategy.
  *
  * `anchors` are tried in order until one matches; each is either a selector or
- * `{ sel, parent, placement }`, where `parent` uses the match's parent (handy
- * when the stable name belongs to a child of the row we actually want).
+ * `{ sel, up, placement }`, where `up` climbs that many parents from the match
+ * (handy when the only stable name belongs to something inside the row we
+ * actually want).
  * `scope` limits the search to a repeating item — a tweet, a post — so feeds
  * get one button each. `resolve` works out which URL that button should send.
  * `label` is whether the word "Nitrate" is written next to the mark by default,
@@ -57,8 +58,8 @@ const SITES = [
       "ytd-watch-metadata #top-level-buttons-computed",
       // The like/dislike pill is the one element in that row with a name that
       // has survived several redesigns, so its parent is the row itself.
-      { sel: "ytd-watch-metadata ytd-segmented-like-dislike-button-view-model", parent: true },
-      { sel: "ytd-watch-metadata segmented-like-dislike-button-view-model", parent: true },
+      { sel: "ytd-watch-metadata ytd-segmented-like-dislike-button-view-model", up: 1 },
+      { sel: "ytd-watch-metadata segmented-like-dislike-button-view-model", up: 1 },
       "#top-level-buttons-computed",
       "ytd-menu-renderer #top-level-buttons-computed",
     ],
@@ -69,7 +70,18 @@ const SITES = [
     matches: () => /(^|\.)twitch\.tv$/.test(location.hostname),
     scope: null,
     label: true,
+    copyStyle: true,
     anchors: [
+      // The clip page's row of actions. Every `data-a-target` that used to be
+      // on these buttons is gone, and the only labelled icon on the whole page
+      // is elsewhere, so the structural pass finds nothing either — which is
+      // why the button was landing in the corner. This is the one hook left:
+      // the link two levels up from it is the row itself.
+      {
+        sel: '[data-test-selector="clips-watch-full-button"]',
+        up: 2,
+        placement: "penultimate",
+      },
       { sel: '[data-a-target="clips-share-button"]', placement: "after" },
       { sel: '[data-target="clips-page__content"] [data-a-target="share-button"]', placement: "after" },
       { sel: '[data-a-target="share-button"]', placement: "after" },
@@ -82,6 +94,9 @@ const SITES = [
     scope: 'article[data-testid="tweet"]',
     // The whole row is icons and counts; a word would be the only text in it.
     label: false,
+    // An opened post draws the same row larger than the timeline does, so the
+    // size is taken from whatever is beside it rather than fixed here.
+    copyStyle: true,
     anchors: ['[role="group"]'],
     resolve: (scope) => {
       const link = scope?.querySelector('a[href*="/status/"]');
@@ -267,7 +282,7 @@ function findActionClusters(root) {
 
 function findAnchor(root) {
   for (const entry of site.anchors) {
-    const { sel, parent = false, placement } = typeof entry === "string" ? { sel: entry } : entry;
+    const { sel, up = 0, placement } = typeof entry === "string" ? { sel: entry } : entry;
     let match = null;
     try {
       match = root.querySelector?.(sel) ?? null;
@@ -277,7 +292,9 @@ function findAnchor(root) {
       match = null;
     }
     if (!match) continue;
-    const node = parent ? match.parentElement : match;
+
+    let node = match;
+    for (let step = 0; step < up && node; step += 1) node = node.parentElement;
     if (node) return { node, placement: placement ?? "append" };
   }
 
@@ -297,8 +314,6 @@ function findAnchor(root) {
 const COPIED = [
   "height",
   "border-radius",
-  "padding-left",
-  "padding-right",
   "font-family",
   "font-size",
   "font-weight",
@@ -306,6 +321,16 @@ const COPIED = [
   "letter-spacing",
   "color",
 ];
+
+/**
+ * Padding is copied only when there is some.
+ *
+ * Twitch's buttons compute to zero — their spacing lives on an inner element —
+ * and copying that would print the label hard against both edges. A zero here
+ * means "the padding is somewhere else", not "there isn't any", so the site
+ * rule's own value stands.
+ */
+const COPIED_IF_SET = ["padding-left", "padding-right"];
 
 function adoptStyle(button, row) {
   let read;
@@ -316,7 +341,9 @@ function adoptStyle(button, row) {
     return;
   }
 
-  const candidates = Array.from(row.querySelectorAll?.("button") ?? []).filter(
+  // Links count as well as buttons: Twitch's "Watch Full Video" is an anchor
+  // styled identically to the buttons beside it.
+  const candidates = Array.from(row.querySelectorAll?.("button, a") ?? []).filter(
     (candidate) => !candidate.hasAttribute(MARK),
   );
   if (!candidates.length) return;
@@ -327,8 +354,10 @@ function adoptStyle(button, row) {
   // edge. A uniform radius has no spaces in it, which rules them both out.
   // Preferring one with a label then gets the padding and font from a button
   // shaped like ours rather than from the round overflow menu.
-  const uniform = (candidate) =>
-    !window.getComputedStyle(candidate).borderRadius.trim().includes(" ");
+  const uniform = (candidate) => {
+    const radius = window.getComputedStyle(candidate).borderRadius || "";
+    return !radius.trim().includes(" ");
+  };
   const reference =
     candidates.find((c) => c.textContent?.trim() && uniform(c)) ??
     candidates.find(uniform) ??
@@ -339,17 +368,34 @@ function adoptStyle(button, row) {
     const value = style.getPropertyValue(property);
     if (value) button.style.setProperty(property, value);
   }
+  for (const property of COPIED_IF_SET) {
+    const value = style.getPropertyValue(property);
+    if (value && parseFloat(value) > 0) button.style.setProperty(property, value);
+  }
 
-  // The background often sits on a wrapper rather than the button itself, so a
-  // transparent answer means "look further up", not "there isn't one".
-  let node = reference;
-  for (let depth = 0; node && depth < 4; depth += 1) {
-    const background = window.getComputedStyle(node).backgroundColor;
-    if (background && !/^(transparent|rgba\(0, 0, 0, 0\))$/.test(background)) {
-      button.style.setProperty("background-color", background);
-      break;
+  // Match the neighbouring icon's size.
+  //
+  // X draws a bigger row on an opened post than in the timeline, so any fixed
+  // size is wrong in one of the two places — which is what made the mark look
+  // undersized once a post was opened. Measuring a sibling gets both, and any
+  // future resize, without knowing which view this is.
+  const mark = button.querySelector(".nitrate-icon");
+  const sibling = reference.querySelector("svg");
+  if (mark && sibling) {
+    const rect = sibling.getBoundingClientRect?.();
+    if (rect?.width > 0 && rect?.height > 0) {
+      mark.style.width = `${rect.width}px`;
+      mark.style.height = `${rect.height}px`;
     }
-    node = node.parentElement;
+  }
+
+  // Only the reference's own background, never an ancestor's. X's action
+  // buttons are transparent on purpose; climbing past them finds the page
+  // behind and paints the button with it, which is either invisible or a solid
+  // block depending on the theme. Transparent here means transparent.
+  const background = style.backgroundColor;
+  if (background && !/^(transparent|rgba\(0, 0, 0, 0\))$/.test(background)) {
+    button.style.setProperty("background-color", background);
   }
 
   button.dataset.nitrateAdopted = "1";
@@ -358,7 +404,11 @@ function adoptStyle(button, row) {
 function place(anchor, button, placement) {
   if (placement === "after") anchor.after(button);
   else if (placement === "prepend") anchor.prepend(button);
-  else anchor.appendChild(button);
+  else if (placement === "penultimate" && anchor.lastElementChild) {
+    // Second from the end: these rows finish with an overflow menu, and sitting
+    // past it reads as belonging to something else.
+    anchor.insertBefore(button, anchor.lastElementChild);
+  } else anchor.appendChild(button);
 }
 
 function scopes() {
@@ -653,13 +703,18 @@ function injectStyles() {
     .nitrate-send[data-site="x"]:hover { background: rgba(88,101,242,.14); }
     .nitrate-send[data-site="x"] .nitrate-icon { width: 18px; height: 18px; }
 
-    /* Twitch uses square-ish corners and small, heavy text. */
+    /* Twitch's clip actions are 32px fully round pills with 14px Inter. The
+       adoption pass overwrites most of this from the Share button itself; these
+       are the values it lands on, kept for when there's nothing to copy. */
     .nitrate-send[data-site="twitch"] {
-      border-radius: 4px;
-      height: 30px;
-      font-size: 12px;
+      height: 32px;
+      border-radius: 9000px;
+      padding: 0 12px;
+      font-family: Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      font-weight: 600;
     }
-    .nitrate-send[data-site="twitch"]:not(:has(.nitrate-label)) { width: 30px; }
+    .nitrate-send[data-site="twitch"]:not(:has(.nitrate-label)) { width: 32px; padding: 0; }
 
     /* Reddit's action row is 32px pills with 12px text. */
     .nitrate-send[data-site="reddit"] { font-size: 12px; }
