@@ -168,6 +168,8 @@ _(All JavaScript is contained in the package. Nothing is fetched or evaluated at
 runtime.)_
 
 **Data usage** — tick **nothing**. The extension collects no data of any kind.
+The one thing it stores is a display preference the user chose themselves, which
+is not user data and doesn't belong in any of these categories.
 
 Then tick all three certifications:
 - I do not sell or transfer user data to third parties, outside of approved use cases
@@ -243,7 +245,7 @@ video, compress, download, discord, share
 **Release notes for this version**
 
 ```
-First release. Adds inline buttons on YouTube, X, Instagram, Reddit and Twitch, a right-click entry for any link, and a toolbar button for the current page.
+First release. Adds a "Send to Nitrate" button on YouTube, X, Instagram, Reddit and Twitch, a right-click entry that works on any link, and a toolbar button for the current page. The button is styled to match each site's own controls, and an options page chooses whether it shows its icon alone or its icon and name.
 ```
 
 ## Notes to reviewer
@@ -251,7 +253,7 @@ First release. Adds inline buttons on YouTube, X, Instagram, Reddit and Twitch, 
 AMO reviews source, so this saves a round trip:
 
 ```
-This extension is a thin bridge to a desktop application. It has no interface of its own beyond a button, and performs no network activity whatsoever.
+This extension is a thin bridge to a desktop application. Its whole interface is one injected button, one context-menu entry, and an options page with a single setting. It performs no network activity whatsoever.
 
 HOW IT WORKS
 Clicking the button (or the context-menu entry) opens a "nitrate://" link in the current tab. That is a custom URL scheme registered by the Nitrate desktop application, which is what actually fetches and compresses the video. The extension's entire job is constructing that link and opening it.
@@ -271,7 +273,9 @@ REMOTE CODE
 None. No eval, no remotely hosted scripts, no dynamic imports.
 
 DATA
-Nothing is collected, stored or transmitted. The content script reads only the href of the post a button was added to, so the correct link is sent rather than the page's own address.
+Nothing is collected or transmitted. The content script reads only the href of the post a button was added to, so the correct link is sent rather than the page's own address.
+
+The only use of storage is one preference, set by the user on the options page: whether the injected button shows its icon alone or its icon and name. It is written to storage.sync as a single string ("auto", "icon" or "label"). No user data of any kind is stored.
 
 COMPANION APPLICATION
 The desktop app is open source and MIT licensed: https://github.com/BeeeFX/Nitrate
