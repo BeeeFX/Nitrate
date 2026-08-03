@@ -321,6 +321,11 @@ class AppStore {
     void this.#loadPlan(job);
   }
 
+  /** Same, for components that need to report something that isn't a job failure. */
+  say(message: string) {
+    this.#say(message);
+  }
+
   /** Shows a short-lived message and clears it again. */
   #say(message: string) {
     this.notice = message;

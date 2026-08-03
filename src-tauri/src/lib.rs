@@ -283,6 +283,34 @@ fn allow_preview(app: AppHandle, path: String) -> Result<String, String> {
     Ok(path)
 }
 
+/// Plays a finished video in whatever the system uses for it.
+///
+/// Done here rather than with the plugin's `openPath` from the frontend, which
+/// needs `opener:allow-open-path` — a permission with no scope, letting the
+/// webview ask the OS to launch anything on disk. The check below keeps it to
+/// video files that exist, in the same spirit as `allow_preview`: hand out the
+/// narrowest thing that does the job.
+#[tauri::command]
+fn open_video(app: AppHandle, path: String) -> Result<(), String> {
+    let file = PathBuf::from(&path);
+    if !file.is_file() {
+        return Err("That file is no longer there.".into());
+    }
+
+    let extension = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !download::VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+        return Err("That isn't a video file.".into());
+    }
+
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_path(file.to_string_lossy(), None::<&str>)
+        .map_err(|e| format!("Couldn't open that video: {e}"))
+}
+
 /// Evenly spaced frames for the trim timeline.
 #[tauri::command]
 async fn filmstrip(
@@ -811,6 +839,7 @@ pub fn run() {
             filmstrip,
             set_editor_size,
             allow_preview,
+            open_video,
         ])
         .setup(move |app| {
             tray::setup(app.handle(), Arc::clone(&suppress_hide))?;

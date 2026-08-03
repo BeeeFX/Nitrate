@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+  import { invoke } from "@tauri-apps/api/core";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     formatBitrate,
     formatDuration,
@@ -38,6 +39,24 @@
   );
 
   let percent = $derived(Math.round(job.progress * 100));
+
+  /**
+   * Plays the finished file.
+   *
+   * This went through the opener plugin's `openPath`, which is not in that
+   * plugin's default permission set — so the call was rejected and the promise
+   * rejected with it. Nothing was awaiting it, so the button did nothing at all
+   * and said nothing about why. Now it goes through our own command, and a
+   * failure reaches the card.
+   */
+  async function play() {
+    if (!job.output) return;
+    try {
+      await invoke("open_video", { path: job.output });
+    } catch (err) {
+      app.say(String(err));
+    }
+  }
 
   let working = $derived(job.status === "running" || job.status === "queued");
   let idle = $derived(!working);
@@ -146,7 +165,7 @@
       {:else if job.status === "done"}
         <button
           class="act"
-          onclick={() => job.output && openPath(job.output)}
+          onclick={play}
           title="Play"
         >
           <svg viewBox="0 0 24 24"><path d="M8 5l12 7-12 7z" fill="currentColor" /></svg>

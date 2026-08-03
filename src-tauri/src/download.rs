@@ -413,7 +413,7 @@ fn parse_progress(line: &str) -> Option<f64> {
 
 /// Containers that carry video. Anything else yt-dlp leaves behind is an
 /// audio-only track from a merge that didn't happen.
-const VIDEO_EXTENSIONS: &[&str] = &[
+pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "webm", "mov", "m4v", "avi", "flv", "ts", "ogv",
 ];
 
