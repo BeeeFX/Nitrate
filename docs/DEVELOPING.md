@@ -25,6 +25,7 @@ npm run app
 | `npm run icons` | Regenerate icons from `assets/icon.svg` |
 | `npm run extension` | Package the browser extension for both stores |
 | `npm run extension:check` | Run the extension's scripts against a stub DOM |
+| `npm run store:shots` | Rebuild the store screenshots at 1280×800 |
 | `npm run bump 0.2.0` | Set the version everywhere it has to match |
 | `npm run check` | Typecheck the frontend |
 | `cargo test` (in `src-tauri/`) | Run the encoder tests |
@@ -151,3 +152,15 @@ matching public key is in `src-tauri/tauri.conf.json`.
 See [docs/store/SUBMISSION.md](store/SUBMISSION.md) for the store listings, and
 `extension/src/content.js` for the per-site button placement, which is the part
 most likely to need maintenance as those sites change their markup.
+
+Before submitting to Firefox, run Mozilla's own linter over the package — AMO
+runs it on upload and rejects the file rather than explaining what to change:
+
+```bash
+npx addons-linter extension/dist/nitrate-extension-firefox-*.zip
+```
+
+Zero errors and zero warnings is the bar, and it's currently met. Two things in
+the manifest exist purely to satisfy it: `data_collection_permissions` set to
+`["none"]`, which Mozilla now requires of every add-on, and a minimum Firefox
+version of 140 (142 on Android), because that key doesn't exist before then.

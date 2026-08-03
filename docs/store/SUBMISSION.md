@@ -19,6 +19,17 @@ That writes both into `extension/dist/`:
 They are **not interchangeable** — Chrome wants a service worker, Firefox wants
 background scripts and a fixed add-on id.
 
+**Check the Firefox package before uploading it.** AMO runs this exact linter on
+upload and rejects the file rather than telling you what to change:
+
+```bash
+npx addons-linter extension/dist/nitrate-extension-firefox-*.zip
+```
+
+It should report zero errors and zero warnings. Don't run it against the Chrome
+zip — it's Mozilla's linter, so it objects to the service worker and the missing
+add-on id, both of which are correct for Chrome.
+
 They're kept off the release page on purpose: a loose zip only invites people to
 sideload a copy that never auto-updates, which is the problem the stores exist to
 solve.
@@ -202,6 +213,20 @@ https://github.com/BeeeFX/Nitrate/blob/main/PRIVACY.md
 <https://addons.mozilla.org/developers/addon/submit/distribution>
 
 Choose **"On this site"** for listed distribution.
+
+**Data collection** — the manifest already declares this, so the form should
+agree with it rather than contradict it:
+
+```
+No, this add-on does not require data collection
+```
+
+Mozilla now requires every add-on to say so explicitly, and an upload without
+the declaration fails validation with *"The `data_collection_permissions`
+property is missing"*. Ours declares `{ "required": ["none"] }`, which is the
+formal way of saying it collects nothing at all. Note that this key only exists
+from Firefox 140, which is why the add-on's minimum version is 140 (142 on
+Android) rather than something older.
 
 **Name**
 

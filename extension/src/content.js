@@ -20,18 +20,59 @@ const FALLBACK_DELAY = 4000;
 // rail — so it's ruled out by role rather than left to lose on size.
 const CHROME = "nav, header, aside, [role='navigation'], [role='banner']";
 
-// Drawn at 24px with 2px strokes, which is what these sites' own icon sets use
-// — a heavier mark reads as a logo dropped into the row rather than a control
-// belonging to it.
-const MARK_SVG = `
-<svg class="nitrate-icon" viewBox="0 0 24 24" aria-hidden="true">
-  <g stroke="currentColor" stroke-width="2" stroke-linecap="round"
-     stroke-linejoin="round" fill="none">
-    <polyline points="7,5 12,9 17,5"/>
-    <polyline points="7,19 12,15 17,19"/>
-  </g>
-  <rect x="6" y="11" width="12" height="2" rx="1" fill="currentColor"/>
-</svg>`;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * The mark, built as elements rather than parsed from a string.
+ *
+ * `innerHTML` would be shorter, but Mozilla's reviewer flags every assignment
+ * to it — it can't tell a constant from something built out of page data. It's
+ * also the one path a page's Trusted Types policy could interfere with. Neither
+ * is worth arguing about for markup this small.
+ *
+ * Drawn at 24px with 2px strokes, matching these sites' own icon sets: a
+ * heavier mark reads as a logo dropped into the row rather than as a control
+ * belonging to it.
+ */
+function markSvg() {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "nitrate-icon");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+
+  const strokes = document.createElementNS(SVG_NS, "g");
+  for (const [name, value] of [
+    ["stroke", "currentColor"],
+    ["stroke-width", "2"],
+    ["stroke-linecap", "round"],
+    ["stroke-linejoin", "round"],
+    ["fill", "none"],
+  ]) {
+    strokes.setAttribute(name, value);
+  }
+
+  for (const points of ["7,5 12,9 17,5", "7,19 12,15 17,19"]) {
+    const chevron = document.createElementNS(SVG_NS, "polyline");
+    chevron.setAttribute("points", points);
+    strokes.append(chevron);
+  }
+  svg.append(strokes);
+
+  const bar = document.createElementNS(SVG_NS, "rect");
+  for (const [name, value] of [
+    ["x", "6"],
+    ["y", "11"],
+    ["width", "12"],
+    ["height", "2"],
+    ["rx", "1"],
+    ["fill", "currentColor"],
+  ]) {
+    bar.setAttribute(name, value);
+  }
+  svg.append(bar);
+
+  return svg;
+}
 
 /**
  * Per-site strategy.
@@ -187,9 +228,14 @@ function makeButton(getUrl) {
   // The tooltip isn't announced, so the name has to be here too — otherwise
   // the mark-only button reads as an unlabelled button to a screen reader.
   button.setAttribute("aria-label", "Send to Nitrate");
-  button.innerHTML = wantsLabel()
-    ? `${MARK_SVG}<span class="nitrate-label">Nitrate</span>`
-    : MARK_SVG;
+
+  button.append(markSvg());
+  if (wantsLabel()) {
+    const label = document.createElement("span");
+    label.className = "nitrate-label";
+    label.textContent = "Nitrate";
+    button.append(label);
+  }
 
   button.addEventListener("click", (event) => {
     // Feeds wrap posts in giant click targets; without this, sending a link

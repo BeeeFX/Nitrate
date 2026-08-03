@@ -75,6 +75,12 @@ function makeElement(tag = "div", attrs = {}) {
       element.children.push(child);
       return child;
     },
+    append(...kids) {
+      for (const child of kids) {
+        child.parentElement = element;
+        element.children.push(child);
+      }
+    },
     prepend(child) {
       child.parentElement = element;
       element.children.unshift(child);
@@ -252,6 +258,7 @@ function makeSandbox(hostname, pathname, fixture) {
     head,
     documentElement,
     createElement: (tag) => makeElement(tag),
+    createElementNS: (_ns, tag) => makeElement(tag),
     querySelector: (selector) => body.querySelector(selector),
     querySelectorAll: (selector) => body.querySelectorAll(selector),
     getElementById: () => makeElement(),
