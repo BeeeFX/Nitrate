@@ -14,6 +14,7 @@
     "ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "bump": "node scripts/bump-version.mjs",
     "extension": "node scripts/build-extension.mjs",
+    "extension:check": "node scripts/check-extension.mjs",
     "icons": "node scripts/make-icons.mjs && tauri icon assets/icon.png",
     "postinstall": "node scripts/fetch-ffmpeg.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json"

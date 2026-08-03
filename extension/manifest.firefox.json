@@ -27,7 +27,11 @@
     "scripts": ["src/background.js"],
     "type": "module"
   },
-  "permissions": ["contextMenus", "scripting", "activeTab"],
+  "options_ui": {
+    "page": "src/options.html",
+    "open_in_tab": false
+  },
+  "permissions": ["contextMenus", "scripting", "activeTab", "storage"],
   "content_scripts": [
     {
       "js": ["src/content.js"],

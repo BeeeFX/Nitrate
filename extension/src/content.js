@@ -2,14 +2,16 @@
 //
 // None of these expose a stable hook — the class names are build hashes and the
 // markup changes without notice. So every site gets a list of candidate anchors
-// tried in order, and if all of them miss, a floating button appears instead.
-// Selector rot then degrades to "the button moved to the corner" rather than
-// "the feature vanished".
+// tried in order, then a structural search that looks for the action row by
+// shape rather than by name, and only if both miss does a floating button
+// appear. Selector rot then degrades to "the button moved" rather than "the
+// feature vanished".
 
 const MARK = "data-nitrate-button";
+const LOG = "[Nitrate]";
 
 const MARK_SVG = `
-<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+<svg class="nitrate-icon" viewBox="0 0 24 24" aria-hidden="true">
   <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
      stroke-linejoin="round" fill="none">
     <polyline points="7,5 12,9 17,5"/>
@@ -21,23 +23,28 @@ const MARK_SVG = `
 /**
  * Per-site strategy.
  *
- * `anchors` are tried in order until one matches. `scope` limits the search to
- * a repeating item (a tweet, a post) so feeds get one button each. `resolve`
- * works out which URL that particular button should send.
+ * `anchors` are tried in order until one matches; each is either a selector or
+ * `{ sel, parent, placement }`, where `parent` uses the match's parent (handy
+ * when the stable name belongs to a child of the row we actually want).
+ * `scope` limits the search to a repeating item — a tweet, a post — so feeds
+ * get one button each. `resolve` works out which URL that button should send.
+ * `label` is whether the word "Nitrate" is written next to the mark by default,
+ * which follows whatever the site's own buttons do.
  */
 const SITES = [
   {
     id: "youtube",
     matches: () => /(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(location.hostname),
     scope: null,
+    label: true,
     anchors: [
       "ytd-watch-metadata #top-level-buttons-computed",
-      "ytd-watch-metadata #actions-inner",
-      "ytd-watch-metadata #actions",
+      // The like/dislike pill is the one element in that row with a name that
+      // has survived several redesigns, so its parent is the row itself.
+      { sel: "ytd-watch-metadata ytd-segmented-like-dislike-button-view-model", parent: true },
+      { sel: "ytd-watch-metadata segmented-like-dislike-button-view-model", parent: true },
       "#top-level-buttons-computed",
       "ytd-menu-renderer #top-level-buttons-computed",
-      "#actions-inner",
-      "#actions",
     ],
     resolve: () => location.href,
   },
@@ -45,18 +52,20 @@ const SITES = [
     id: "twitch",
     matches: () => /(^|\.)twitch\.tv$/.test(location.hostname),
     scope: null,
+    label: true,
     anchors: [
-      '[data-a-target="clips-share-button"]',
-      '[data-target="clips-page__content"] [data-a-target="share-button"]',
-      '[data-a-target="share-button"]',
+      { sel: '[data-a-target="clips-share-button"]', placement: "after" },
+      { sel: '[data-target="clips-page__content"] [data-a-target="share-button"]', placement: "after" },
+      { sel: '[data-a-target="share-button"]', placement: "after" },
     ],
-    anchorPlacement: "after",
     resolve: () => location.href,
   },
   {
     id: "x",
     matches: () => /(^|\.)x\.com$|(^|\.)twitter\.com$/.test(location.hostname),
     scope: 'article[data-testid="tweet"]',
+    // The whole row is icons and counts; a word would be the only text in it.
+    label: false,
     anchors: ['[role="group"]'],
     resolve: (scope) => {
       const link = scope?.querySelector('a[href*="/status/"]');
@@ -67,7 +76,15 @@ const SITES = [
     id: "reddit",
     matches: () => /(^|\.)reddit\.com$/.test(location.hostname),
     scope: "shreddit-post",
-    anchors: ['[slot="credit-bar"]', "shreddit-post-share-button", '[data-post-click-location="share"]'],
+    label: true,
+    // Deliberately not the credit bar: that's the byline above the title, which
+    // is where the button ended up looking like a stray banner. These all sit
+    // in the vote/comment/share row along the bottom, where it belongs.
+    anchors: [
+      { sel: "shreddit-post-share-button", placement: "after" },
+      { sel: '[data-post-click-location="share"]', placement: "after" },
+      { sel: 'shreddit-post [slot="full-post-link"] ~ div [data-testid="comments-action-button"]', placement: "after" },
+    ],
     resolve: (scope) => {
       const permalink = scope?.getAttribute("permalink");
       return permalink ? new URL(permalink, location.origin).href : location.href;
@@ -76,10 +93,17 @@ const SITES = [
   {
     id: "instagram",
     matches: () => /(^|\.)instagram\.com$/.test(location.hostname),
-    scope: "article",
-    anchors: ["section:has(svg[aria-label])", "section"],
+    // Feed posts live in `article`; reels don't, and their controls are a
+    // vertical rail down the right-hand side. When there's no article to scope
+    // to, search the page and let the structural pass find that rail.
+    scope: () => {
+      const articles = Array.from(document.querySelectorAll("article"));
+      return articles.length ? articles : [document.body];
+    },
+    label: false,
+    anchors: [],
     resolve: (scope) => {
-      const link = scope?.querySelector('a[href*="/p/"], a[href*="/reel/"]');
+      const link = scope?.querySelector?.('a[href*="/p/"], a[href*="/reel/"]');
       return link ? new URL(link.getAttribute("href"), location.origin).href : location.href;
     },
   },
@@ -93,11 +117,9 @@ const site = SITES.find((s) => {
   }
 });
 
-// A single line on load, so "nothing happened" can be told apart from "never
-// ran". Without it, a missed selector and a script that was never injected look
-// identical from the outside — which is exactly the case that needs diagnosing,
-// given these selectors are expected to rot.
-const LOG = "[Nitrate]";
+// "auto" follows the site: written out where the native buttons carry words,
+// mark-only where they're all icons. Overridable from the extension's options.
+let labelMode = "auto";
 
 // Startup lives at the very bottom of this file, after every declaration has
 // been evaluated. Calling it from up here would work for the hoisted function
@@ -105,13 +127,25 @@ const LOG = "[Nitrate]";
 
 // ---------------------------------------------------------------------------
 
+function wantsLabel() {
+  if (labelMode === "icon") return false;
+  if (labelMode === "label") return true;
+  return Boolean(site?.label);
+}
+
 function makeButton(getUrl) {
   const button = document.createElement("button");
   button.setAttribute(MARK, "1");
   button.className = "nitrate-send";
+  button.dataset.site = site.id;
   button.type = "button";
   button.title = "Send to Nitrate";
-  button.innerHTML = `${MARK_SVG}<span>Nitrate</span>`;
+  // The tooltip isn't announced, so the name has to be here too — otherwise
+  // the mark-only button reads as an unlabelled button to a screen reader.
+  button.setAttribute("aria-label", "Send to Nitrate");
+  button.innerHTML = wantsLabel()
+    ? `${MARK_SVG}<span class="nitrate-label">Nitrate</span>`
+    : MARK_SVG;
 
   button.addEventListener("click", (event) => {
     // Feeds wrap posts in giant click targets; without this, sending a link
@@ -145,42 +179,98 @@ function makeButton(getUrl) {
   return button;
 }
 
+/**
+ * Finds the action row by shape instead of by name.
+ *
+ * Every one of these sites groups its controls into one small box holding
+ * several labelled icons, so the smallest element containing at least three of
+ * them is the row — or, on a reel, the vertical rail. That survives a rename,
+ * which is what the selectors above keep failing to do.
+ */
+function findActionCluster(root) {
+  const scope = root === document ? document.body : root;
+  if (!scope?.querySelectorAll) return null;
+
+  const icons = Array.from(scope.querySelectorAll("svg[aria-label], svg[role='img']"));
+  if (icons.length < 3) return null;
+
+  const counts = new Map();
+  for (const icon of icons) {
+    let node = icon.parentElement;
+    for (let depth = 0; node && node !== scope.parentElement && depth < 10; depth += 1) {
+      counts.set(node, (counts.get(node) || 0) + 1);
+      node = node.parentElement;
+    }
+  }
+
+  let best = null;
+  for (const [node, count] of counts) {
+    if (count < 3) continue;
+    if (node.querySelector(`[${MARK}]`)) continue;
+    const rect = node.getBoundingClientRect?.();
+    if (!rect || !rect.width || !rect.height) continue;
+    const area = rect.width * rect.height;
+    if (!best || area < best.area) best = { node, area, rect };
+  }
+
+  if (!best) return null;
+  // A rail is taller than it is wide; the button wants to stack, not sit beside.
+  best.node.dataset.nitrateOrientation =
+    best.rect.height > best.rect.width * 1.5 ? "column" : "row";
+  return best.node;
+}
+
+function findAnchor(root) {
+  for (const entry of site.anchors) {
+    const { sel, parent = false, placement } = typeof entry === "string" ? { sel: entry } : entry;
+    let match = null;
+    try {
+      match = root.querySelector?.(sel) ?? null;
+    } catch {
+      // `:has()` and custom elements aren't universally supported; a bad
+      // selector shouldn't take the whole scan down.
+      match = null;
+    }
+    if (!match) continue;
+    const node = parent ? match.parentElement : match;
+    if (node) return { node, placement: placement ?? "append" };
+  }
+
+  const cluster = findActionCluster(root);
+  return cluster ? { node: cluster, placement: "append" } : null;
+}
+
 function place(anchor, button, placement) {
   if (placement === "after") anchor.after(button);
   else anchor.appendChild(button);
 }
 
-function scan() {
-  const scopes = site.scope
-    ? Array.from(document.querySelectorAll(site.scope))
-    : [document];
+function scopes() {
+  if (typeof site.scope === "function") return site.scope();
+  if (site.scope) return Array.from(document.querySelectorAll(site.scope));
+  return [document];
+}
 
-  for (const scope of scopes) {
+function scan() {
+  for (const scope of scopes()) {
     const root = scope === document ? document : scope;
     if (root.querySelector?.(`[${MARK}]`)) continue;
 
-    let anchor = null;
-    for (const selector of site.anchors) {
-      try {
-        anchor = root.querySelector(selector);
-      } catch {
-        // `:has()` and custom elements aren't universally supported; a bad
-        // selector shouldn't take the whole scan down.
-        anchor = null;
-      }
-      if (anchor) break;
-    }
-
+    const anchor = findAnchor(root);
     if (!anchor) continue;
+
     const button = makeButton(() => site.resolve(scope === document ? null : scope));
-    place(anchor, button, site.anchorPlacement);
+    if (anchor.node.dataset?.nitrateOrientation === "column") {
+      button.classList.add("nitrate-stacked");
+    }
+    place(anchor.node, button, anchor.placement);
   }
 
   ensureFallback();
 }
 
 /**
- * When no anchor matched anywhere, put a button in the corner so the feature
+ * When nothing matched anywhere, put a button in the corner so the feature
  * still works on a page whose markup has moved on.
  */
 function ensureFallback() {
@@ -193,16 +283,22 @@ function ensureFallback() {
   }
   if (existing) return;
 
-  // Worth saying out loud: it means a selector has rotted, and knowing which
-  // site is most of the work of fixing it.
+  // Worth saying out loud: it means both the selectors and the structural pass
+  // came up empty, and knowing which site is most of the work of fixing it.
   console.info(
-    `${LOG} no anchor matched on ${site.id} — using the floating button. ` +
-      `Tried: ${site.anchors.join(", ")}`,
+    `${LOG} nothing matched on ${site.id} — using the floating button. ` +
+      `Tried: ${site.anchors.map((a) => (typeof a === "string" ? a : a.sel)).join(", ") || "(structural only)"}`,
   );
 
   const button = makeButton(() => location.href);
   button.classList.add("nitrate-floating");
   document.body?.appendChild(button);
+}
+
+/** Drops every button so the next scan rebuilds them in the new shape. */
+function rerender() {
+  for (const button of document.querySelectorAll(`[${MARK}]`)) button.remove();
+  scheduleScan();
 }
 
 // SPA navigation and infinite feeds both mean the DOM never settles, so the
@@ -228,35 +324,131 @@ function observe() {
   window.addEventListener("yt-navigate-finish", scheduleScan);
 }
 
+function watchSettings() {
+  try {
+    chrome.storage?.sync?.get({ labelMode: "auto" }, (stored) => {
+      if (chrome.runtime?.lastError) return;
+      if (stored?.labelMode && stored.labelMode !== labelMode) {
+        labelMode = stored.labelMode;
+        rerender();
+      }
+    });
+    chrome.storage?.onChanged?.addListener((changes, area) => {
+      if (area !== "sync" || !changes.labelMode) return;
+      labelMode = changes.labelMode.newValue || "auto";
+      rerender();
+    });
+  } catch {
+    // No storage access is survivable — "auto" is the sensible default anyway.
+  }
+}
+
+/**
+ * Styling aims at "one of the site's own buttons", not at brand presence.
+ *
+ * The chip is a translucent grey rather than blurple, which reads correctly on
+ * both a light and a dark page without having to detect which one this is; only
+ * the mark keeps the brand colour. Sizes are matched per site because a 36px
+ * YouTube pill next to Instagram's bare 24px icons would look wrong either way
+ * round.
+ */
 function injectStyles() {
   const style = document.createElement("style");
   style.textContent = `
     .nitrate-send {
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 6px;
-      padding: 6px 12px;
-      margin: 0 4px;
+      box-sizing: border-box;
       border: none;
-      border-radius: 999px;
-      background: #5865F2;
-      color: #fff;
-      font: 600 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: rgba(128,128,128,.16);
+      color: inherit;
       cursor: pointer;
       vertical-align: middle;
-      transition: filter .15s, opacity .15s;
+      border-radius: 999px;
+      height: 32px;
+      padding: 0 12px;
+      margin: 0 4px;
+      /* Longhand on purpose: "inherit" is only valid as a whole value, so
+         "font: 600 13px/1 inherit" silently drops the entire declaration. */
+      font-family: inherit;
+      font-weight: 600;
+      font-size: 13px;
+      line-height: 1;
+      transition: background-color .15s, opacity .15s;
     }
-    .nitrate-send:hover { filter: brightness(1.12); }
-    .nitrate-send.is-busy { opacity: .6; cursor: default; }
-    .nitrate-send.is-done { background: #43B581; }
-    .nitrate-send.is-failed { background: #ED4245; }
+    .nitrate-send:hover { background: rgba(128,128,128,.3); }
+    .nitrate-send .nitrate-icon { width: 16px; height: 16px; color: #5865F2; flex: none; }
+    .nitrate-send .nitrate-label { color: inherit; white-space: nowrap; }
+    .nitrate-send.is-done { background: rgba(67,181,129,.25); }
+    .nitrate-send.is-done .nitrate-icon { color: #43B581; }
+    .nitrate-send.is-failed { background: rgba(237,66,69,.25); }
+    .nitrate-send.is-failed .nitrate-icon { color: #ED4245; }
+
+    /* No label means a circle, not a stubby pill. */
+    .nitrate-send:not(:has(.nitrate-label)) { width: 32px; padding: 0; }
+
+    /* A rail rather than a row: full width of the column, stacked under it. */
+    .nitrate-send.nitrate-stacked { margin: 12px auto 0; display: flex; }
+
+    /* YouTube's action row is 36px pills with 14px text. */
+    .nitrate-send[data-site="youtube"] {
+      height: 36px;
+      padding: 0 14px;
+      margin-left: 8px;
+      font: 500 14px/1 "Roboto", Arial, sans-serif;
+    }
+    .nitrate-send[data-site="youtube"]:not(:has(.nitrate-label)) { width: 36px; padding: 0; }
+    .nitrate-send[data-site="youtube"] .nitrate-icon { width: 18px; height: 18px; }
+
+    /* Instagram's controls are bare outline icons on the page background. */
+    .nitrate-send[data-site="instagram"] {
+      background: none;
+      height: 40px;
+      width: 40px;
+      padding: 0;
+      margin: 0;
+    }
+    .nitrate-send[data-site="instagram"]:hover { background: none; opacity: .6; }
+    .nitrate-send[data-site="instagram"] .nitrate-icon { width: 24px; height: 24px; }
+
+    /* X packs its row tightly and sizes icons at 18px. */
+    .nitrate-send[data-site="x"] {
+      height: 34px;
+      background: none;
+      margin: 0;
+    }
+    .nitrate-send[data-site="x"]:not(:has(.nitrate-label)) { width: 34px; }
+    .nitrate-send[data-site="x"]:hover { background: rgba(88,101,242,.14); }
+    .nitrate-send[data-site="x"] .nitrate-icon { width: 18px; height: 18px; }
+
+    /* Twitch uses square-ish corners and small, heavy text. */
+    .nitrate-send[data-site="twitch"] {
+      border-radius: 4px;
+      height: 30px;
+      font-size: 12px;
+    }
+    .nitrate-send[data-site="twitch"]:not(:has(.nitrate-label)) { width: 30px; }
+
+    /* Reddit's action row is 32px pills with 12px text. */
+    .nitrate-send[data-site="reddit"] { font-size: 12px; }
+
     .nitrate-send.nitrate-floating {
       position: fixed;
       right: 18px;
       bottom: 18px;
       z-index: 2147483000;
+      width: auto;
+      height: 36px;
+      padding: 0 14px;
+      background: #5865F2;
+      color: #fff;
+      font: 600 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
       box-shadow: 0 6px 20px rgba(0,0,0,.35);
     }
+    .nitrate-send.nitrate-floating .nitrate-icon { color: #fff; }
+    .nitrate-send.nitrate-floating:hover { background: #6b76f5; }
   `;
   (document.head || document.documentElement).appendChild(style);
 }
@@ -268,6 +460,7 @@ function injectStyles() {
 if (site) {
   console.info(`${LOG} active on ${site.id}`);
   injectStyles();
+  watchSettings();
   scheduleScan();
   observe();
 } else {

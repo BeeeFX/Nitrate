@@ -67,6 +67,9 @@ WHAT IT DOES
 • Adds a right-click entry that works on any link, on any site
 • Adds a toolbar button that sends whatever page you're currently on
 
+The button is styled to match each site's own controls, and can be set to show
+its mark alone if you'd rather it stayed quiet.
+
 That's the whole extension. It hands an address to a program on your own computer and stops there.
 
 REQUIRES THE DESKTOP APP
@@ -144,6 +147,11 @@ Reads the address of the tab the user is currently on, so that address can be ha
 `scripting`
 ```
 Used solely to open a "nitrate://" link in the current tab, which is the mechanism that passes the URL to the desktop application. The injected function does nothing but set the location to that link. No page data is read, stored or modified.
+```
+
+`storage`
+```
+Stores one setting, chosen by the user on the options page: whether the injected button shows its icon alone or its icon and name. No user data of any kind is stored.
 ```
 
 **Host permission justification** _(youtube.com, x.com, twitter.com, instagram.com, reddit.com, twitch.tv)_

@@ -5,6 +5,7 @@
 // build just copies `src/` and drops the right manifest on top.
 
 import AdmZip from "adm-zip";
+import { spawn } from "node:child_process";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,8 +39,26 @@ async function buildIcons() {
   }
 }
 
+/**
+ * Runs the scripts before packaging them.
+ *
+ * Kept as a separate process so a stub-DOM global can't leak into the build,
+ * and so `npm run extension:check` works on its own.
+ */
+async function check() {
+  await new Promise((ok, fail) => {
+    const child = spawn(process.execPath, [join(root, "scripts", "check-extension.mjs")], {
+      stdio: "inherit",
+    });
+    child.on("exit", (code) =>
+      code === 0 ? ok() : fail(new Error("extension checks failed")),
+    );
+  });
+}
+
 async function build() {
   const version = await appVersion();
+  await check();
   await buildIcons();
   await rm(outRoot, { recursive: true, force: true });
 

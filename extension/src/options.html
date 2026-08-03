@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Send to Nitrate — options</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 20px 22px;
+        min-width: 340px;
+        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      h1 { margin: 0 0 4px; font-size: 15px; }
+      p.sub { margin: 0 0 18px; opacity: .7; font-size: 13px; }
+      fieldset { border: none; margin: 0; padding: 0; }
+      legend { font-weight: 600; margin-bottom: 8px; padding: 0; }
+      label {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        padding: 9px 10px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      label:hover { background: rgba(128,128,128,.14); }
+      input { margin: 3px 0 0; accent-color: #5865F2; }
+      .hint { display: block; opacity: .65; font-size: 12px; }
+      footer { margin-top: 18px; font-size: 12px; opacity: .7; }
+      a { color: #5865F2; }
+      #saved {
+        margin-left: 8px;
+        color: #43B581;
+        font-size: 12px;
+        opacity: 0;
+        transition: opacity .2s;
+      }
+      #saved.show { opacity: 1; }
+    </style>
+  </head>
+  <body>
+    <h1>Send to Nitrate</h1>
+    <p class="sub">How the button looks on the pages it's added to.</p>
+
+    <fieldset>
+      <legend>Button style<span id="saved">Saved</span></legend>
+
+      <label>
+        <input type="radio" name="labelMode" value="auto" />
+        <span>
+          Match the site
+          <span class="hint">Writes "Nitrate" where the site's own buttons have
+            words, and shows the mark alone where they don't.</span>
+        </span>
+      </label>
+
+      <label>
+        <input type="radio" name="labelMode" value="icon" />
+        <span>
+          Mark only
+          <span class="hint">Never writes the name. The least intrusive option.</span>
+        </span>
+      </label>
+
+      <label>
+        <input type="radio" name="labelMode" value="label" />
+        <span>
+          Mark and name
+          <span class="hint">Always writes "Nitrate", so it's obvious what the
+            button does.</span>
+        </span>
+      </label>
+    </fieldset>
+
+    <footer>
+      Needs the <a href="https://github.com/BeeeFX/Nitrate" target="_blank"
+        rel="noreferrer">Nitrate desktop app</a> installed.
+    </footer>
+
+    <script src="options.js"></script>
+  </body>
+</html>
