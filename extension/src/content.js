@@ -10,6 +10,11 @@
 const MARK = "data-nitrate-button";
 const LOG = "[Nitrate]";
 
+// How long the page gets to build its action row before the corner button is
+// accepted as the answer.
+const START = Date.now();
+const FALLBACK_DELAY = 4000;
+
 const MARK_SVG = `
 <svg class="nitrate-icon" viewBox="0 0 24 24" aria-hidden="true">
   <g stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
@@ -255,7 +260,12 @@ function scopes() {
 function scan() {
   for (const scope of scopes()) {
     const root = scope === document ? document : scope;
-    if (root.querySelector?.(`[${MARK}]`)) continue;
+    // The floating button has to be excluded here. It lives on `body`, so on a
+    // page with no scope it counts as "already done" and every later scan
+    // short-circuits — meaning if the fallback ever appears before the action
+    // row has rendered, it wins permanently and the inline button never
+    // arrives. That's timing-dependent, which is why it came and went.
+    if (root.querySelector?.(`[${MARK}]:not(.nitrate-floating)`)) continue;
 
     const anchor = findAnchor(root);
     if (!anchor) continue;
@@ -289,6 +299,14 @@ function ensureFallback() {
     return;
   }
   if (existing) return;
+
+  // These pages build their action rows well after first paint, so an
+  // immediate fallback would routinely beat the real thing. Give the page a
+  // few seconds to finish before concluding there's nothing to attach to.
+  if (Date.now() - START < FALLBACK_DELAY) {
+    scheduleScan();
+    return;
+  }
 
   // Worth saying out loud: it means both the selectors and the structural pass
   // came up empty, and knowing which site is most of the work of fixing it.

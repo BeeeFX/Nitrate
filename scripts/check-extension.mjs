@@ -108,8 +108,10 @@ function makeSandbox(hostname, pathname) {
   };
 }
 
-/** Waits past the content script's 400ms debounce so `scan()` actually runs. */
-const settle = () => new Promise((r) => setTimeout(r, 550));
+// Long enough to clear the 400ms scan debounce *and* the 4s grace period the
+// script gives a page before falling back to the corner button — otherwise the
+// fallback path, which is the one a stub DOM always ends up on, never runs.
+const settle = () => new Promise((r) => setTimeout(r, 5000));
 
 async function run(file, hostname, pathname) {
   const code = await readFile(join(root, "extension", "src", file), "utf8");
@@ -123,20 +125,38 @@ async function run(file, hostname, pathname) {
 async function main() {
   let failures = 0;
 
-  for (const [name, hostname, pathname] of HOSTS) {
-    try {
-      const logs = await run("content.js", hostname, pathname);
-      const expected = name === "unsupported" ? "isn't a supported site" : `active on ${name}`;
-      if (!logs.some((line) => line.includes(expected))) {
-        console.error(`  FAIL  content.js on ${hostname}: expected "${expected}", got ${JSON.stringify(logs)}`);
-        failures += 1;
-      } else {
-        console.log(`  ok    content.js on ${hostname}`);
+  // Concurrent because each one waits out the fallback delay, and the sandboxes
+  // share nothing.
+  const results = await Promise.all(
+    HOSTS.map(async ([name, hostname, pathname]) => {
+      try {
+        return { name, hostname, logs: await run("content.js", hostname, pathname) };
+      } catch (err) {
+        return { name, hostname, error: err };
       }
-    } catch (err) {
-      console.error(`  FAIL  content.js on ${hostname}: ${err.message}`);
+    }),
+  );
+
+  for (const { name, hostname, logs, error } of results) {
+    if (error) {
+      console.error(`  FAIL  content.js on ${hostname}: ${error.message}`);
       failures += 1;
+      continue;
     }
+    const expected = name === "unsupported" ? "isn't a supported site" : `active on ${name}`;
+    if (!logs.some((line) => line.includes(expected))) {
+      console.error(`  FAIL  content.js on ${hostname}: expected "${expected}", got ${JSON.stringify(logs)}`);
+      failures += 1;
+      continue;
+    }
+    // The stub matches nothing, so every supported site must reach the corner
+    // button. If it doesn't, the fallback has stopped working.
+    if (name !== "unsupported" && !logs.some((line) => line.includes("floating button"))) {
+      console.error(`  FAIL  content.js on ${hostname}: never fell back to the floating button`);
+      failures += 1;
+      continue;
+    }
+    console.log(`  ok    content.js on ${hostname}`);
   }
 
   try {
