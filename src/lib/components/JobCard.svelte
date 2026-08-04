@@ -114,6 +114,17 @@
    */
   async function beginFileDrag(event: DragEvent) {
     if (!draggable || !job.output) return;
+
+    // A press that starts on a button belongs to the button. Without this,
+    // twitching the mouse while clicking Remove would hand someone the file
+    // instead of deleting it — and the click never lands, because the drag
+    // swallows it. Cancelled outright rather than left to the webview, which
+    // would otherwise drag the card's text.
+    if ((event.target as HTMLElement | null)?.closest("button")) {
+      event.preventDefault();
+      return;
+    }
+
     event.preventDefault();
 
     try {
@@ -140,25 +151,25 @@
   let settings = $derived(app.settingsFor(job));
 </script>
 
-<article class="card" class:done={job.status === "done"} class:failed={job.status === "failed"}>
-  <div class="top">
-    <!-- The thumbnail is the handle: it's the part that looks like the video,
-         so it's the part people reach for.
+<!-- The whole card is the handle, not just the thumbnail: it's one row
+     representing one file, so anywhere along it should pick the file up.
+     Presses that land on a button are excluded in `beginFileDrag`.
 
-         No role and no tab stop on purpose. Dragging has no keyboard
-         equivalent to expose, and everything it achieves is already reachable
-         from the buttons on the right — play the file, or show it in its
-         folder. Adding a focusable element per card would cost every keyboard
-         user three extra stops to reach a gesture they can't perform. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="thumb"
-      class:empty={!job.thumbnail}
-      class:grabbable={draggable}
-      draggable={draggable}
-      ondragstart={beginFileDrag}
-      title={draggable ? "Drag into Discord, a folder, anywhere" : undefined}
-    >
+     No role and no tab stop, deliberately. Dragging has no keyboard equivalent
+     to expose, and everything it achieves is already reachable from the buttons
+     on the right — play the file, or show it in its folder. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<article
+  class="card"
+  class:done={job.status === "done"}
+  class:failed={job.status === "failed"}
+  class:grabbable={draggable}
+  draggable={draggable}
+  ondragstart={beginFileDrag}
+  title={draggable ? "Drag this into Discord, a folder, anywhere" : undefined}
+>
+  <div class="top">
+    <div class="thumb" class:empty={!job.thumbnail}>
       {#if job.thumbnail}
         <img src={job.thumbnail} alt="" />
       {:else}
@@ -445,27 +456,18 @@
     background: rgba(0, 0, 0, 0.28);
   }
 
-  /* The only hint that it can be picked up, short of writing it on the card. */
-  .thumb.grabbable {
+  /* The only hint that the row can be picked up, short of writing it on the
+     card. The buttons keep their own cursor, since they aren't handles. */
+  .card.grabbable {
     cursor: grab;
   }
 
-  .thumb.grabbable:active {
+  .card.grabbable:active {
     cursor: grabbing;
   }
 
-  .thumb.grabbable::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    box-shadow: inset 0 0 0 1px rgba(124, 136, 255, 0);
-    transition: box-shadow 0.15s;
-    pointer-events: none;
-  }
-
-  .thumb.grabbable:hover::after {
-    box-shadow: inset 0 0 0 1px rgba(124, 136, 255, 0.65);
+  .card.grabbable button {
+    cursor: pointer;
   }
 
   .thumb img {
