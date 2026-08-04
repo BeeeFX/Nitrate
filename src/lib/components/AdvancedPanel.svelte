@@ -234,6 +234,24 @@
           }}
         />
       </label>
+
+      <label class="toggle-row">
+        <span class="toggle-text">
+          <span class="row-label">Copy when finished</span>
+          <span class="sub">
+            Puts each finished video on the clipboard, ready to paste into
+            Discord. Off by default, since it replaces whatever you had copied.
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          checked={app.copyWhenDone}
+          onchange={(e) => {
+            app.copyWhenDone = e.currentTarget.checked;
+            void app.persist();
+          }}
+        />
+      </label>
     </div>
 
     <!-- Links -->

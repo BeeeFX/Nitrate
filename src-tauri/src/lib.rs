@@ -283,6 +283,43 @@ fn allow_preview(app: AppHandle, path: String) -> Result<String, String> {
     Ok(path)
 }
 
+/// Puts a finished video on the clipboard as a file.
+///
+/// The file itself, not its path as text — so pasting into Discord attaches the
+/// video, and pasting into Explorer produces a copy of it. That's the CF_HDROP
+/// format, the same thing Explorer's own Copy puts there, and it's why this
+/// can't go through Tauri's clipboard plugin: that one handles text, HTML and
+/// images, none of which is a file.
+#[tauri::command]
+fn copy_video_to_clipboard(path: String) -> Result<(), String> {
+    let file = PathBuf::from(&path);
+    if !file.is_file() {
+        return Err("That file is no longer there.".into());
+    }
+
+    #[cfg(windows)]
+    {
+        use clipboard_win::{raw, Clipboard};
+
+        // The clipboard is a single shared resource, and whichever app had it
+        // open last may not have let go yet. A few attempts costs nothing and
+        // avoids failing on a race that resolves itself in milliseconds.
+        let _clipboard =
+            Clipboard::new_attempts(10).map_err(|e| format!("Couldn't open the clipboard: {e}"))?;
+
+        raw::empty().map_err(|e| format!("Couldn't clear the clipboard: {e}"))?;
+        raw::set_file_list(&[file.to_string_lossy().as_ref()])
+            .map_err(|e| format!("Couldn't copy the file: {e}"))?;
+
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err("Copying a file to the clipboard isn't supported on this platform yet.".into())
+    }
+}
+
 /// Says the title bar has been pressed, so any movement now is a drag.
 ///
 /// The window can't tell one from the other on its own: the same event arrives
@@ -854,6 +891,7 @@ pub fn run() {
             set_editor_size,
             allow_preview,
             open_video,
+            copy_video_to_clipboard,
             window_drag_started,
         ])
         .setup(move |app| {
@@ -902,4 +940,57 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Nitrate");
+}
+
+#[cfg(all(test, windows))]
+mod clipboard_tests {
+    use super::copy_video_to_clipboard;
+
+    /// Copies a file, then reads the clipboard back to see what landed there.
+    ///
+    /// Worth testing properly because the failure mode is silent and specific:
+    /// putting the *path* on the clipboard as text also "works", right up until
+    /// someone pastes into Discord and gets `C:\Users\...\clip.mp4` as a
+    /// message instead of the video.
+    #[test]
+    fn copying_a_video_puts_the_file_on_the_clipboard() {
+        let dir = std::env::temp_dir().join(format!("nitrate-clip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("clip.mp4");
+        std::fs::write(&file, b"not really a video, but it is a file").unwrap();
+
+        let result = copy_video_to_clipboard(file.to_string_lossy().into_owned());
+
+        // A machine with no window station — some CI containers — can't open
+        // the clipboard at all. That's the environment failing, not the code,
+        // and it shouldn't turn the suite red.
+        if let Err(message) = &result {
+            if message.contains("Couldn't open the clipboard") {
+                eprintln!("skipped: no clipboard on this machine ({message})");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        }
+        result.expect("copying should succeed");
+
+        let listed: Vec<String> = clipboard_win::get_clipboard(clipboard_win::formats::FileList)
+            .expect("the clipboard should now hold a file list");
+
+        assert_eq!(listed.len(), 1, "expected exactly one file, got {listed:?}");
+        assert!(
+            std::path::Path::new(&listed[0]) == file,
+            "clipboard holds {:?}, expected {:?}",
+            listed[0],
+            file
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_a_file_that_is_not_there() {
+        let missing = std::env::temp_dir().join("nitrate-does-not-exist.mp4");
+        let result = copy_video_to_clipboard(missing.to_string_lossy().into_owned());
+        assert!(result.is_err(), "a missing file should not be copied");
+    }
 }

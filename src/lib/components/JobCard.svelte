@@ -140,6 +140,28 @@
     }
   }
 
+  /**
+   * Copies the file on right-click, anywhere the row can be dragged from.
+   *
+   * The two gestures are the same idea: drag it if the target is open in front
+   * of you, copy it if it isn't. Pasting works in Discord and in Explorer alike,
+   * because what goes on the clipboard is the file rather than its path.
+   */
+  async function copyFile(event: MouseEvent) {
+    if (!draggable || !job.output) return;
+    // A button's own context menu isn't ours to take over.
+    if ((event.target as HTMLElement | null)?.closest("button")) return;
+
+    event.preventDefault();
+
+    try {
+      await invoke("copy_video_to_clipboard", { path: job.output });
+      app.say("Copied — paste it wherever you like");
+    } catch (err) {
+      app.say(String(err));
+    }
+  }
+
   let working = $derived(job.status === "running" || job.status === "queued");
   let idle = $derived(!working);
   // A link has no local file to edit until it has been fetched.
@@ -166,7 +188,10 @@
   class:grabbable={draggable}
   draggable={draggable}
   ondragstart={beginFileDrag}
-  title={draggable ? "Drag this into Discord, a folder, anywhere" : undefined}
+  oncontextmenu={copyFile}
+  title={draggable
+    ? "Drag this into Discord, a folder, anywhere — or right-click to copy it"
+    : undefined}
 >
   <div class="top">
     <div class="thumb" class:empty={!job.thumbnail}>

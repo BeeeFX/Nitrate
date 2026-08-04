@@ -40,6 +40,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 tauri-plugin-drag = "2.1.1"
 
 [target.'cfg(windows)'.dependencies]
+clipboard-win = "5.4.1"
 # Hides the console window that would otherwise flash on every ffmpeg invocation.
 windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
 

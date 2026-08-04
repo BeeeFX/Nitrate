@@ -6,6 +6,7 @@ import {
   isEnabled as autostartIsEnabled,
 } from "@tauri-apps/plugin-autostart";
 import { load, type Store } from "@tauri-apps/plugin-store";
+import { truncateName } from "./format";
 import {
   DEFAULT_SETTINGS,
   LONG_VIDEO_SECONDS,
@@ -54,6 +55,14 @@ class AppStore {
    * wait for a click.
    */
   browserLinksAutoStart = $state(false);
+  /**
+   * Whether a finished video goes straight onto the clipboard.
+   *
+   * Off by default, because taking over the clipboard unasked is the sort of
+   * thing that loses someone whatever they had copied. On, it closes the loop:
+   * copy a link, paste it here, paste the video into Discord.
+   */
+  copyWhenDone = $state(false);
   /** True until the walkthrough has been seen. */
   showTour = $state(false);
 
@@ -136,6 +145,8 @@ class AppStore {
       if (typeof pinned === "boolean") this.pinned = pinned;
       const links = await this.#store.get<boolean>("browserLinksAutoStart");
       if (typeof links === "boolean") this.browserLinksAutoStart = links;
+      const copy = await this.#store.get<boolean>("copyWhenDone");
+      if (typeof copy === "boolean") this.copyWhenDone = copy;
       // Absent means this is a first run, which is exactly when the tour helps.
       this.showTour = (await this.#store.get<boolean>("tourSeen")) !== true;
     } catch {
@@ -150,6 +161,7 @@ class AppStore {
       await this.#store.set("autoStart", this.autoStart);
       await this.#store.set("pinned", this.pinned);
       await this.#store.set("browserLinksAutoStart", this.browserLinksAutoStart);
+      await this.#store.set("copyWhenDone", this.copyWhenDone);
       await this.#store.set("tourSeen", !this.showTour);
       await this.#store.save();
     } catch {
@@ -241,6 +253,8 @@ class AppStore {
 
         void this.refresh(job.id);
       }
+
+      if (this.copyWhenDone) void this.#copyFinished(job);
     });
 
     await listen<{ id: string; error: string }>(
@@ -335,6 +349,27 @@ class AppStore {
   /** Same, for components that need to report something that isn't a job failure. */
   say(message: string) {
     this.#say(message);
+  }
+
+  /**
+   * Puts a just-finished video on the clipboard, and says so.
+   *
+   * The confirmation isn't decoration: taking the clipboard is invisible, and
+   * without it there's no way to tell whether the video is on there or whatever
+   * you copied ten minutes ago still is.
+   *
+   * When several finish together the last one wins, which is the only sensible
+   * reading of a clipboard that holds one thing — so it names the file rather
+   * than saying "copied" and leaving you to guess which.
+   */
+  async #copyFinished(job: Job) {
+    if (!job.output) return;
+    try {
+      await invoke("copy_video_to_clipboard", { path: job.output });
+      this.#say(`${truncateName(job.name)} copied — paste it anywhere`);
+    } catch (err) {
+      this.#say(`Couldn't copy it to the clipboard: ${err}`);
+    }
   }
 
   /** Shows a short-lived message and clears it again. */

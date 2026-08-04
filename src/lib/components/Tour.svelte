@@ -21,10 +21,30 @@
       icon: "link",
     },
     {
+      title: "Take it wherever you need it",
+      body: "When a video is done, drag its row straight into Discord or a folder — anywhere along the row works. Right-click it instead to copy the file, then paste.",
+      icon: "grab",
+      toggle: {
+        label: "Copy every finished video automatically",
+        hint: "Paste a link here, paste the video into Discord. It does replace whatever you had copied.",
+        get: () => app.copyWhenDone,
+        set: (on: boolean) => {
+          app.copyWhenDone = on;
+          void app.persist();
+        },
+      },
+    },
+    {
       title: "Skip the copying, soon",
       body: "A browser extension is on the way that puts a Send to Nitrate button straight on those sites. It's waiting to be approved by the Chrome and Firefox stores — the link will go up on GitHub as soon as it is.",
       icon: "puzzle",
       action: { label: "Follow along on GitHub", url: EXTENSION_URL },
+      toggle: {
+        label: "Start browser links without asking",
+        hint: "Left off, they wait in the queue for a click — any page can send one, not just the extension.",
+        get: () => app.browserLinksAutoStart,
+        set: (on: boolean) => void app.setBrowserLinksAutoStart(on),
+      },
     },
   ];
 
@@ -77,6 +97,20 @@
             <path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" />
           </g></svg
         >
+      {:else if step.icon === "grab"}
+        <svg viewBox="0 0 24 24"
+          ><g
+            stroke="currentColor"
+            stroke-width="1.7"
+            fill="none"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11" />
+            <path d="M12 11V4.5a1.5 1.5 0 0 1 3 0V11" />
+            <path d="M15 11V6.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-1a6 6 0 0 1-6-6v-2a1.5 1.5 0 0 1 3 0" />
+          </g></svg
+        >
       {:else}
         <svg viewBox="0 0 24 24"
           ><path
@@ -92,6 +126,22 @@
 
     <h2>{step.title}</h2>
     <p>{step.body}</p>
+
+    <!-- Settable here rather than described. A tour that says "there's an
+         option for that in settings" has just given someone homework. -->
+    {#if step.toggle}
+      <label class="opt">
+        <input
+          type="checkbox"
+          checked={step.toggle.get()}
+          onchange={(e) => step.toggle?.set(e.currentTarget.checked)}
+        />
+        <span class="opt-text">
+          <span class="opt-label">{step.toggle.label}</span>
+          <span class="opt-hint">{step.toggle.hint}</span>
+        </span>
+      </label>
+    {/if}
 
     {#if step.action}
       <button class="link" onclick={() => openUrl(step.action.url)}>
@@ -137,6 +187,10 @@
   .card {
     width: 100%;
     max-width: 340px;
+    /* A step carrying both a paragraph and a toggle is the tallest thing here,
+       and the window is only 660px. Scroll rather than run off the bottom. */
+    max-height: 100%;
+    overflow-y: auto;
     padding: 22px 20px 16px;
     border-radius: var(--radius-lg);
     background: rgba(255, 255, 255, 0.05);
@@ -178,6 +232,48 @@
     font-size: 12px;
     line-height: 1.55;
     color: var(--text-dim);
+  }
+
+  .opt {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: 100%;
+    margin-top: 14px;
+    padding: 10px 12px;
+    text-align: left;
+    border-radius: var(--radius);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    cursor: pointer;
+  }
+
+  .opt:hover {
+    background: var(--surface-hover);
+  }
+
+  .opt input {
+    flex-shrink: 0;
+    margin-top: 1px;
+    accent-color: var(--blurple);
+  }
+
+  .opt-text {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .opt-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .opt-hint {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-faint);
   }
 
   .link {
