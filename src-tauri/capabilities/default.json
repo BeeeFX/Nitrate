@@ -20,6 +20,7 @@
     "updater:default",
     "process:allow-restart",
     "autostart:default",
-    "deep-link:default"
+    "deep-link:default",
+    "drag:default"
   ]
 }

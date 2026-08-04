@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { Channel, invoke } from "@tauri-apps/api/core";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     formatBitrate,
@@ -58,6 +58,77 @@
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Dragging the finished file out
+  // ---------------------------------------------------------------------
+
+  const draggable = $derived(job.status === "done" && Boolean(job.output));
+
+  /**
+   * The picture that follows the cursor, as a PNG.
+   *
+   * Thumbnails are JPEG — cheaper to make and there are a lot of them — but the
+   * drag plugin takes PNG only, so it's converted once and kept. Done ahead of
+   * time because `dragstart` has no room to wait for an image to decode.
+   */
+  let dragImage = $state<string | null>(null);
+
+  $effect(() => {
+    if (!draggable || !job.thumbnail || dragImage) return;
+
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.drawImage(image, 0, 0);
+      dragImage = canvas.toDataURL("image/png");
+    };
+    image.src = job.thumbnail;
+  });
+
+  /** A plain dark tile, for a video whose first frame never arrived. */
+  function fallbackImage(): string {
+    const canvas = document.createElement("canvas");
+    canvas.width = 160;
+    canvas.height = 90;
+    const context = canvas.getContext("2d");
+    if (context) {
+      context.fillStyle = "#1b1e27";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#5865F2";
+      context.fillRect(0, canvas.height - 4, canvas.width, 4);
+    }
+    return canvas.toDataURL("image/png");
+  }
+
+  /**
+   * Hands the real file to whatever it's dropped on.
+   *
+   * The webview's own drag can only offer text, which is why dragging a card
+   * into Discord used to do nothing useful. `preventDefault` calls that off and
+   * the OS drag takes over with the actual file, so the receiving app sees what
+   * it would see from Explorer.
+   */
+  async function beginFileDrag(event: DragEvent) {
+    if (!draggable || !job.output) return;
+    event.preventDefault();
+
+    try {
+      await invoke("plugin:drag|start_drag", {
+        item: [job.output],
+        image: dragImage ?? fallbackImage(),
+        // Copy, not move: the file stays in the output folder afterwards.
+        options: { mode: "copy" },
+        onEvent: new Channel(),
+      });
+    } catch (err) {
+      app.say(`Couldn't start the drag: ${err}`);
+    }
+  }
+
   let working = $derived(job.status === "running" || job.status === "queued");
   let idle = $derived(!working);
   // A link has no local file to edit until it has been fetched.
@@ -71,7 +142,23 @@
 
 <article class="card" class:done={job.status === "done"} class:failed={job.status === "failed"}>
   <div class="top">
-    <div class="thumb" class:empty={!job.thumbnail}>
+    <!-- The thumbnail is the handle: it's the part that looks like the video,
+         so it's the part people reach for.
+
+         No role and no tab stop on purpose. Dragging has no keyboard
+         equivalent to expose, and everything it achieves is already reachable
+         from the buttons on the right — play the file, or show it in its
+         folder. Adding a focusable element per card would cost every keyboard
+         user three extra stops to reach a gesture they can't perform. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="thumb"
+      class:empty={!job.thumbnail}
+      class:grabbable={draggable}
+      draggable={draggable}
+      ondragstart={beginFileDrag}
+      title={draggable ? "Drag into Discord, a folder, anywhere" : undefined}
+    >
       {#if job.thumbnail}
         <img src={job.thumbnail} alt="" />
       {:else}
@@ -356,6 +443,29 @@
     border-radius: var(--radius-sm);
     overflow: hidden;
     background: rgba(0, 0, 0, 0.28);
+  }
+
+  /* The only hint that it can be picked up, short of writing it on the card. */
+  .thumb.grabbable {
+    cursor: grab;
+  }
+
+  .thumb.grabbable:active {
+    cursor: grabbing;
+  }
+
+  .thumb.grabbable::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px rgba(124, 136, 255, 0);
+    transition: box-shadow 0.15s;
+    pointer-events: none;
+  }
+
+  .thumb.grabbable:hover::after {
+    box-shadow: inset 0 0 0 1px rgba(124, 136, 255, 0.65);
   }
 
   .thumb img {

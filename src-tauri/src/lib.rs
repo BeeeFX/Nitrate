@@ -822,6 +822,10 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // Lets a finished video be dragged out of the window into Explorer or
+        // Discord. The webview can't start a file drag on its own — that needs
+        // the OS drag-and-drop machinery, which this reaches.
+        .plugin(tauri_plugin_drag::init())
         .manage(AppState {
             bins: ffmpeg::resolve(),
             cancels: Mutex::new(HashMap::new()),

@@ -57,4 +57,6 @@ their terms of service — that's between you and the site.
 | [Tauri](https://tauri.app) | MIT / Apache-2.0 |
 | [Svelte](https://svelte.dev) | MIT |
 | [Vite](https://vite.dev) | MIT |
+| [tauri-plugin-drag](https://crates.io/crates/tauri-plugin-drag) | MIT / Apache-2.0 |
 | [sharp](https://sharp.pixelplumbing.com) (build-time only) | Apache-2.0 |
+| [addons-linter](https://github.com/mozilla/addons-linter) (build-time only) | MPL-2.0 |
