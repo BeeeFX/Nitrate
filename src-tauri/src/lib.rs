@@ -5,6 +5,7 @@ pub mod deeplink;
 pub mod download;
 pub mod encode;
 pub mod ffmpeg;
+pub mod media;
 mod tray;
 
 use base64::Engine as _;

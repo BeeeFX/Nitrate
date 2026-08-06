@@ -49,6 +49,97 @@ fn stamp_path(data_dir: &Path) -> PathBuf {
     data_dir.join("bin").join("yt-dlp.stamp")
 }
 
+// ---------------------------------------------------------------------------
+// gallery-dl, for the stills yt-dlp can't reach
+// ---------------------------------------------------------------------------
+
+/// Pinned rather than "latest".
+///
+/// gallery-dl moved off GitHub to Codeberg — the GitHub releases still exist
+/// but carry no assets at all, so the obvious URL silently returns a nine-byte
+/// "Not found" that looks like a downloaded program until you run it. Pinning
+/// also means the checksum below stays meaningful.
+const GALLERY_VERSION: &str = "1.32.9";
+
+/// SHA-256 of the pinned Windows build, from the project's own SHA256SUMS.
+///
+/// Checked because this is an executable arriving over the network, and an
+/// unverified one is exactly the shape of thing that gets an app quarantined.
+/// yt-dlp is fetched without this today, which is worth fixing separately.
+const GALLERY_SHA256_WINDOWS: &str =
+    "a3f7eb5ad0fdb6176dd0044b583ced7e7d918f27221b6f729825d243daff44fe";
+
+fn gallery_asset() -> &'static str {
+    if cfg!(windows) {
+        "gallery-dl.exe"
+    } else {
+        "gallery-dl.bin"
+    }
+}
+
+pub fn gallery_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("bin").join(gallery_asset())
+}
+
+/// Downloads gallery-dl if it's missing. Returns the path either way.
+pub fn ensure_gallery(data_dir: &Path) -> Result<PathBuf, String> {
+    let target = gallery_path(data_dir);
+    if target.is_file() {
+        return Ok(target);
+    }
+
+    let dir = target
+        .parent()
+        .ok_or("Couldn't work out where to put the image downloader.")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
+
+    let url = format!(
+        "https://codeberg.org/mikf/gallery-dl/releases/download/v{GALLERY_VERSION}/{}",
+        gallery_asset()
+    );
+
+    let bytes = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .user_agent("nitrate")
+        .build()
+        .map_err(|e| format!("Couldn't start the download: {e}"))?
+        .get(&url)
+        .send()
+        .map_err(|e| format!("Couldn't reach Codeberg to fetch the image downloader: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Codeberg refused the request: {e}"))?
+        .bytes()
+        .map_err(|e| format!("The image downloader transfer failed: {e}"))?;
+
+    if cfg!(windows) {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        if digest != GALLERY_SHA256_WINDOWS {
+            return Err(format!(
+                "The image downloader didn't match its published checksum \
+                 (expected {GALLERY_SHA256_WINDOWS}, got {digest}). Nothing was installed."
+            ));
+        }
+    }
+
+    // Written beside the target and renamed, so an interrupted fetch can't
+    // leave a half-written binary that looks installed.
+    let temp = target.with_extension("part");
+    std::fs::write(&temp, &bytes)
+        .map_err(|e| format!("Couldn't save the image downloader: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755));
+    }
+
+    std::fs::rename(&temp, &target)
+        .map_err(|e| format!("Couldn't install the image downloader: {e}"))?;
+
+    Ok(target)
+}
+
 fn base_command(program: &Path) -> Command {
     let mut cmd = Command::new(program);
     #[cfg(windows)]
