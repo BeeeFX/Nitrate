@@ -648,3 +648,107 @@ fn keep_mode_leaves_an_unedited_file_completely_alone() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_gif_lands_under_the_target() {
+    let dir = temp_dir("gif-target");
+    // Long and busy enough that a naive full-size GIF would be far too big.
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 6, 4000);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    let target = 2_000_000;
+    let mut set = settings(target, &dir);
+    set.video_codec = VideoCodec::Gif;
+    set.container = Container::Gif;
+    set.audio_codec = AudioCodec::None;
+
+    let plan = encode::plan(&info, &set, &Edits::default(), &bins).expect("plan should succeed");
+    assert_eq!(plan.encoder, "gif");
+    assert!(plan.crf.is_none(), "a GIF has no CRF to set");
+    assert_eq!(plan.audio_kbps, 0, "a GIF carries no sound");
+    assert!(plan.gif_colors > 0, "a palette size is required");
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("gif encode should succeed")
+        .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    assert_eq!(
+        outcome.output.extension().and_then(|e| e.to_str()),
+        Some("gif"),
+        "expected a .gif, got {:?}",
+        outcome.output
+    );
+    assert!(
+        outcome.final_bytes <= target,
+        "gif was {} bytes, over the {target} target",
+        outcome.final_bytes
+    );
+
+    // Really a GIF, not an mp4 wearing the extension: GIF87a/GIF89a magic.
+    let head = std::fs::read(&outcome.output).expect("output should be readable");
+    assert_eq!(&head[0..3], b"GIF", "output is not a GIF file");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_gif_steps_itself_down_when_the_first_try_is_too_big() {
+    let dir = temp_dir("gif-ladder");
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 6, 4000);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    // Small enough that the opening guess cannot possibly fit, so the ladder
+    // has to run. Without this the suite only ever proves the easy path.
+    let target = 120_000;
+    let mut set = settings(target, &dir);
+    set.video_codec = VideoCodec::Gif;
+    set.container = Container::Gif;
+    set.audio_codec = AudioCodec::None;
+
+    let opening = encode::plan(&info, &set, &Edits::default(), &bins).expect("plan should succeed");
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("gif encode should succeed")
+        .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    assert!(
+        outcome.final_bytes <= target,
+        "gif was {} bytes, over the {target} target after {} attempts at {}px",
+        outcome.final_bytes,
+        outcome.attempts,
+        outcome.plan.width
+    );
+    assert!(
+        outcome.attempts > 1,
+        "expected the ladder to run; it fit first time at {}px",
+        outcome.plan.width
+    );
+    assert!(
+        outcome.plan.width < opening.width,
+        "expected a narrower gif than the opening {}px, got {}px",
+        opening.width,
+        outcome.plan.width
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

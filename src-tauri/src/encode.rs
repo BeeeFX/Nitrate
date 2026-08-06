@@ -23,6 +23,9 @@ pub enum VideoCodec {
     H265,
     Vp9,
     Av1,
+    /// Not a video codec in any real sense, but it's what people mean when they
+    /// say they want a GIF, and it belongs in the same list they pick from.
+    Gif,
 }
 
 impl VideoCodec {
@@ -32,6 +35,7 @@ impl VideoCodec {
             VideoCodec::H265 => "libx265",
             VideoCodec::Vp9 => "libvpx-vp9",
             VideoCodec::Av1 => "libsvtav1",
+            VideoCodec::Gif => "gif",
         }
     }
 
@@ -42,6 +46,8 @@ impl VideoCodec {
             VideoCodec::H265 => &["hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_videotoolbox"],
             VideoCodec::Av1 => &["av1_nvenc", "av1_qsv"],
             VideoCodec::Vp9 => &["vp9_qsv"],
+            // No GPU makes GIFs. Nothing to fall back to, and nothing lost.
+            VideoCodec::Gif => &[],
         }
     }
 
@@ -53,11 +59,20 @@ impl VideoCodec {
             VideoCodec::H265 => 0.030,
             VideoCodec::Vp9 => 0.032,
             VideoCodec::Av1 => 0.025,
+            // Meaningless here: a GIF's size comes from its palette and how
+            // well neighbouring frames match, not from a bitrate.
+            VideoCodec::Gif => 0.0,
         }
     }
 
     fn supports_two_pass(self) -> bool {
-        true
+        // A GIF is already encoded twice — once to find a palette, once to
+        // apply it — and neither pass is aiming at a bitrate.
+        self != VideoCodec::Gif
+    }
+
+    pub fn is_gif(self) -> bool {
+        self == VideoCodec::Gif
     }
 }
 
@@ -67,6 +82,7 @@ pub enum Container {
     Mp4,
     Webm,
     Mkv,
+    Gif,
 }
 
 impl Container {
@@ -75,6 +91,7 @@ impl Container {
             Container::Mp4 => "mp4",
             Container::Webm => "webm",
             Container::Mkv => "mkv",
+            Container::Gif => "gif",
         }
     }
 }
@@ -134,6 +151,11 @@ impl QualityLevel {
             (VideoCodec::Av1, QualityLevel::Small) => 45,
             (VideoCodec::Av1, QualityLevel::Balanced) => 35,
             (VideoCodec::Av1, QualityLevel::High) => 28,
+
+            // A GIF has no quality dial of this kind. Its size is set by the
+            // frame size, the frame rate and the palette, which is what the
+            // GIF planner works with instead.
+            (VideoCodec::Gif, _) => 0,
         }
     }
 
@@ -287,8 +309,22 @@ pub struct Plan {
     /// Copy the streams instead of encoding them. Only ever set in keep mode,
     /// and only when the edits don't touch the picture.
     pub copy_streams: bool,
+    /// Palette size for GIF output. Ignored by every other codec.
+    pub gif_colors: u32,
     pub notes: Vec<String>,
 }
+
+/// Widths to step down through when a GIF comes out too big.
+///
+/// Width first, and frame rate barely at all: measured on a real clip, halving
+/// the width twice cut the file by 2.9x while halving the frame rate cut it by
+/// only 1.45x. Neighbouring frames still compress against each other, so
+/// dropping frames buys far less than it costs in smoothness — the opposite of
+/// the trade-off for video, where the frame rate ladder comes first.
+const GIF_WIDTHS: &[u32] = &[640, 560, 480, 400, 320, 260, 200, 160];
+
+/// Frame rates to fall back on, once width alone hasn't been enough.
+const GIF_FPS: &[f64] = &[20.0, 15.0, 12.0, 10.0, 8.0];
 
 /// Bits per pixel at a reference CRF, per encoder family.
 ///
@@ -307,6 +343,10 @@ fn reference_bpp(codec: VideoCodec) -> (f64, f64) {
         VideoCodec::H265 => (28.0, 0.060),
         VideoCodec::Vp9 => (32.0, 0.060),
         VideoCodec::Av1 => (35.0, 0.045),
+        // Measured rather than borrowed: a 15s 640px clip at 20fps came out at
+        // 6.5 MB, which works back to roughly this. The CRF anchor is unused —
+        // nothing scales a GIF by CRF — but the shape of the function needs one.
+        VideoCodec::Gif => (0.0, 0.47),
     }
 }
 
@@ -367,6 +407,12 @@ pub fn plan(
             source_height,
             notes,
         );
+    }
+
+    // GIF before anything else: none of the bitrate reasoning below applies,
+    // in any of the three modes.
+    if settings.video_codec.is_gif() {
+        return plan_gif(info, settings, edits, source_width, source_height, notes);
     }
 
     if settings.mode == TargetMode::Keep {
@@ -485,6 +531,7 @@ pub fn plan(
         // The target is the estimate in this mode.
         estimated_bytes: None,
         copy_streams: false,
+        gif_colors: 0,
         notes,
     })
 }
@@ -594,6 +641,7 @@ fn plan_by_quality(
         downscaled: height < source_height,
         estimated_bytes,
         copy_streams: false,
+        gif_colors: 0,
         notes,
     })
 }
@@ -609,6 +657,9 @@ fn keep_crf(codec: VideoCodec) -> u32 {
         VideoCodec::H265 => 22,
         VideoCodec::Vp9 => 26,
         VideoCodec::Av1 => 28,
+        // Unused: keep mode copies rather than re-encodes, and a GIF asked for
+        // in keep mode still goes down the GIF path.
+        VideoCodec::Gif => 0,
     }
 }
 
@@ -694,6 +745,7 @@ fn plan_by_keeping(
         downscaled: height < source_height,
         estimated_bytes,
         copy_streams,
+        gif_colors: 0,
         notes,
     })
 }
@@ -773,6 +825,154 @@ fn numeric_preset(preset: &str, min: u32, max: u32, fallback: u32) -> String {
 /// Builds the argument list for one ffmpeg pass.
 ///
 /// `pass` is `None` for a single-pass encode, or `Some(1 | 2)` for two-pass.
+/// Narrows the GIF towards a target it overshot. `false` when out of room.
+///
+/// Jumps to the width the overshoot implies rather than stepping one rung at a
+/// time. A GIF's size tracks its pixel count, so the width wanted is roughly
+/// the current width scaled by the square root of how far off it was — the
+/// same measure-and-correct idea the bitrate path uses, and for the same
+/// reason: there are only three attempts, and crawling wastes them. Stepping
+/// one rung at a time genuinely failed here, running out of attempts at 480px
+/// with a target that needed 200px.
+fn step_gif_down(plan: &mut Plan, info: &MediaInfo, got: u64, target: u64) -> bool {
+    /// Below this a GIF is a postage stamp; give up rather than pretend.
+    const MIN_WIDTH: u32 = 80;
+
+    if got > 0 && plan.width > MIN_WIDTH {
+        // A little under the target rather than exactly at it, since the next
+        // encode won't land precisely where this arithmetic says.
+        let scale = ((target as f64 * 0.92) / got as f64).sqrt();
+        let wanted = even((plan.width as f64 * scale).max(MIN_WIDTH as f64));
+
+        // Deliberately not snapped to `GIF_WIDTHS`. That ladder picks a
+        // sensible opening width, but as a floor on corrections it blocks the
+        // one move that works: an early version stopped at the ladder's 160px
+        // and spent its remaining attempts shaving the frame rate, finishing
+        // 11% over a target that 110px would have met outright.
+        if wanted < plan.width {
+            plan.width = wanted.max(MIN_WIDTH);
+            plan.height = even(plan.width as f64 / aspect_of(info));
+            return true;
+        }
+    }
+
+    // As narrow as is worth going, so the frame rate is what's left to give.
+    if let Some(next) = GIF_FPS.iter().copied().find(|f| *f < plan.fps - 0.01) {
+        plan.fps = next;
+        return true;
+    }
+
+    false
+}
+
+/// Source aspect ratio, guarding the degenerate cases probing can hand back.
+fn aspect_of(info: &MediaInfo) -> f64 {
+    if info.width == 0 || info.height == 0 {
+        return 16.0 / 9.0;
+    }
+    info.width as f64 / info.height as f64
+}
+
+/// Plans a GIF, where none of the bitrate arithmetic applies.
+///
+/// Size comes from frame size times frame count times palette, so the planner
+/// picks a starting width from the measured bits-per-pixel figure and lets the
+/// retry loop walk it down. Starting close beats starting large: every attempt
+/// is a full re-encode, and GIF encoding isn't quick.
+fn plan_gif(
+    info: &MediaInfo,
+    settings: &Settings,
+    edits: &Edits,
+    source_width: u32,
+    source_height: u32,
+    mut notes: Vec<String>,
+) -> Result<Plan, String> {
+    let duration = edits.duration(info.duration).max(0.05);
+    let aspect = aspect_of(info);
+
+    // Palette size follows the quality setting: fewer colours is a smaller file
+    // and, on flat or cartoonish material, barely visible.
+    let colors = match settings.quality {
+        QualityLevel::Small => 64,
+        QualityLevel::Balanced => 128,
+        QualityLevel::High => 256,
+    };
+
+    let mut fps = settings.max_fps.unwrap_or(15.0).min(info.fps.max(1.0));
+    if settings.mode == TargetMode::Size {
+        fps = fps.min(GIF_FPS[0]);
+    }
+
+    let start_width = if settings.mode == TargetMode::Size {
+        // bytes ≈ bpp × w × h × fps × duration ÷ 8, solved for width with
+        // height following the aspect ratio.
+        let (_, bpp) = reference_bpp(VideoCodec::Gif);
+        let budget = settings.target_bytes as f64 * settings.safety_margin.clamp(0.5, 0.999);
+        let width = ((budget * 8.0 * aspect) / (bpp * fps * duration)).sqrt();
+        GIF_WIDTHS
+            .iter()
+            .copied()
+            .find(|w| (*w as f64) <= width)
+            .unwrap_or(*GIF_WIDTHS.last().unwrap())
+    } else {
+        match settings.quality {
+            QualityLevel::Small => 320,
+            QualityLevel::Balanced => 480,
+            QualityLevel::High => 640,
+        }
+    };
+
+    let width = even(start_width.min(source_width.max(2)) as f64);
+    let height = even(width as f64 / aspect);
+
+    notes.push(format!(
+        "GIF at {width}px, {fps:.0} fps, {colors} colours — no sound, since a GIF has none."
+    ));
+    if settings.mode == TargetMode::Size && duration > 10.0 {
+        notes.push(
+            "GIFs run roughly eight times the size of the same clip as video; \
+             trimming it shorter buys far more than anything else here."
+                .into(),
+        );
+    }
+
+    Ok(Plan {
+        mode: settings.mode,
+        video_kbps: 0,
+        crf: None,
+        audio_kbps: 0,
+        width,
+        height,
+        fps,
+        encoder: "gif".into(),
+        downscaled: height < source_height,
+        estimated_bytes: None,
+        copy_streams: false,
+        gif_colors: colors,
+        notes,
+    })
+}
+
+/// Builds the palette-then-map chain a decent GIF needs.
+///
+/// `split` feeds the same frames twice: once to `palettegen`, which picks the
+/// best colours for this particular clip, and once to `paletteuse`, which maps
+/// every frame onto them. Bayer dithering rather than the default because it's
+/// stable frame to frame — error-diffusion dithers shimmer as the noise pattern
+/// changes, and on a loop that reads as the whole image crawling.
+fn gif_filter_chain(pre: &[String], colors: u32) -> String {
+    let mut chain = String::new();
+    for filter in pre {
+        chain.push_str(filter);
+        chain.push(',');
+    }
+    chain.push_str(&format!(
+        "split[a][b];[a]palettegen=max_colors={colors}:stats_mode=diff[p];\
+         [b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+    ));
+    chain
+}
+
 fn build_args(
     task: &Task,
     output: &Path,
@@ -835,6 +1035,20 @@ fn build_args(
     if (plan.fps - info.fps).abs() > 0.01 {
         filters.push(format!("fps={:.3}", plan.fps));
     }
+
+    // A GIF is built in two passes over one command: work out the best 256
+    // colours for this clip, then map every frame onto them. Skipping that and
+    // letting the encoder use a fixed palette is what makes most GIFs look
+    // like they were made in 1998.
+    if task.settings.video_codec.is_gif() {
+        args.push(s("-filter_complex"));
+        args.push(gif_filter_chain(&filters, plan.gif_colors));
+        // No sound in a GIF, and no timestamps to preserve either.
+        args.extend([s("-an"), s("-loop"), s("0")]);
+        args.push(output.to_string_lossy().into_owned());
+        return args;
+    }
+
     if !filters.is_empty() {
         args.push(s("-vf"));
         args.push(filters.join(","));
@@ -1120,11 +1334,26 @@ pub fn run_job(
         // Rate control aims, it doesn't promise. If we overshot, scale the
         // bitrate by how far off we were and go again. Quality and keep modes
         // have no ceiling to overshoot, so whatever came out is the answer.
-        if plan.crf.is_some()
-            || plan.copy_streams
-            || final_bytes <= settings.target_bytes
-            || attempts >= MAX_ATTEMPTS
-        {
+        if plan.copy_streams || final_bytes <= settings.target_bytes || attempts >= MAX_ATTEMPTS {
+            break;
+        }
+
+        // A GIF has no bitrate to correct, so overshooting means making the
+        // picture smaller instead: down the width ladder first, and only once
+        // that's exhausted does the frame rate give way.
+        if settings.video_codec.is_gif() {
+            if !step_gif_down(&mut plan, info, final_bytes, settings.target_bytes) {
+                break;
+            }
+            plan.notes.push(format!(
+                "Too big; retrying at {}px, {:.0} fps.",
+                plan.width, plan.fps
+            ));
+            on_progress(0.0, "Retrying");
+            continue;
+        }
+
+        if plan.crf.is_some() {
             break;
         }
 

@@ -57,12 +57,14 @@ export const VIDEO_CODECS: {
   { id: "h265", label: "H.265", hint: "~30% smaller, spotty inline preview." },
   { id: "vp9", label: "VP9", hint: "Good quality, slow to encode." },
   { id: "av1", label: "AV1", hint: "Smallest files, newest support." },
+  { id: "gif", label: "GIF", hint: "Loops inline, no sound. Roughly 8x the size." },
 ];
 
 export const CONTAINERS: { id: Container; label: string }[] = [
   { id: "mp4", label: "MP4" },
   { id: "webm", label: "WebM" },
   { id: "mkv", label: "MKV" },
+  { id: "gif", label: "GIF" },
 ];
 
 export const AUDIO_CODECS: { id: AudioCodec; label: string }[] = [
@@ -148,6 +150,9 @@ export const AUDIO_BITRATES = [64, 96, 128, 160, 192, 256];
 /** Codec/container pairs that actually mux. */
 export function containersFor(codec: VideoCodec): Container[] {
   switch (codec) {
+    // A GIF is its own container; there's nothing else to put one in.
+    case "gif":
+      return ["gif"];
     case "vp9":
       return ["webm", "mkv"];
     case "av1":
@@ -158,6 +163,8 @@ export function containersFor(codec: VideoCodec): Container[] {
 }
 
 export function audioCodecsFor(container: Container): AudioCodec[] {
+  // The format has no concept of sound, so "none" isn't a choice here.
+  if (container === "gif") return ["none"];
   return container === "webm"
     ? ["opus", "copy", "none"]
     : ["aac", "opus", "copy", "none"];

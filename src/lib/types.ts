@@ -33,8 +33,8 @@ export interface Plan {
   notes: string[];
 }
 
-export type VideoCodec = "h264" | "h265" | "vp9" | "av1";
-export type Container = "mp4" | "webm" | "mkv";
+export type VideoCodec = "h264" | "h265" | "vp9" | "av1" | "gif";
+export type Container = "mp4" | "webm" | "mkv" | "gif";
 export type AudioCodec = "aac" | "opus" | "copy" | "none";
 
 export type TargetMode = "size" | "quality" | "keep";
