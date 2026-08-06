@@ -38,6 +38,15 @@
 
   let finished = $derived(app.jobs.filter((j) => j.status === "done").length);
   let hasJobs = $derived(app.jobs.length > 0);
+
+  /**
+   * Newest first, so what you just added is under the drop zone you added it
+   * with — rather than below however much history has piled up.
+   *
+   * Reversed for display only. The list itself stays in the order things
+   * arrived, which is what batch drops and everything reading it expect.
+   */
+  let ordered = $derived([...app.jobs].reverse());
   let hasFinished = $derived(
     app.jobs.some((j) => j.status !== "running" && j.status !== "queued"),
   );
@@ -120,7 +129,7 @@
 
         {#if hasJobs}
           <div class="jobs">
-            {#each app.jobs as job (job.id)}
+            {#each ordered as job (job.id)}
               <JobCard {job} />
             {/each}
           </div>
