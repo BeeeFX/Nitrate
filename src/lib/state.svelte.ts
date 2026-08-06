@@ -22,6 +22,7 @@ import {
   type Edits,
   type FileInfo,
   type Job,
+  type MediaKind,
   type Plan,
   type Settings,
   type UrlInfo,
@@ -257,6 +258,39 @@ class AppStore {
       if (this.copyWhenDone) void this.#copyFinished(job);
     });
 
+    // A link that turned out to hold several things. The link's own job ends
+    // here and each item takes its place, tagged with the post they shared.
+    await listen<{
+      id: string;
+      title: string;
+      items: { path: string; kind: MediaKind }[];
+    }>("job://fetched", ({ payload }) => {
+      const origin = this.#find(payload.id);
+      const at = this.jobs.findIndex((j) => j.id === payload.id);
+      if (at === -1) return;
+
+      // The post's own id becomes the group's, so the items sit exactly where
+      // the link was rather than jumping to the end of the list.
+      const groupId = payload.id;
+      const made: Job[] = payload.items.map((item) => ({
+        ...this.#blankJob(`job-${nextId++}`, "file"),
+        path: item.path,
+        name: item.path.split(/[\\/]/).pop() ?? payload.title,
+        status: "queued",
+        stage: "Reading…",
+        groupId,
+        groupTitle: payload.title,
+        mediaKind: item.kind,
+        settings: origin?.settings ?? null,
+      }));
+
+      this.jobs.splice(at, 1, ...made);
+
+      // Probe each one for its dimensions, poster frame and plan, exactly as a
+      // dropped file would be.
+      for (const job of made) void this.refresh(job.id);
+    });
+
     await listen<{ id: string; error: string }>(
       "job://failed",
       ({ payload }) => {
@@ -404,6 +438,9 @@ class AppStore {
       knownDuration: null,
       settings: null,
       heldReason: null,
+      groupId: null,
+      groupTitle: null,
+      mediaKind: null,
     };
   }
 

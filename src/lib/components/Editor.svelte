@@ -76,7 +76,10 @@
       (job.info?.sizeBytes ?? 0) > 0 &&
       (job.info?.sizeBytes ?? 0) <= settings.targetBytes,
   );
-  const dirty = $derived(isTrimmed || crop !== null);
+  /** A photo out of a post: croppable, but there's nothing to trim or play. */
+  const isStill = $derived(job.mediaKind === "photo");
+
+  const dirty = $derived(isStill ? crop !== null : isTrimmed || crop !== null);
   // Nothing to do only when it already fits *and* hasn't been edited. In keep
   // mode there's no compressing to do at all, so an unedited video is a no-op.
   const canCompress = $derived(
@@ -475,6 +478,9 @@
       </div>
     </div>
 
+    <!-- A still has nothing to trim, so the whole timeline goes rather than
+         sitting there disabled. Crop is the only edit that means anything. -->
+    {#if !isStill}
     <div class="timeline">
       <div
         class="strip"
@@ -547,6 +553,7 @@
         <span>{formatDuration(effectiveOut)}</span>
       </div>
     </div>
+    {/if}
 
     <!-- The same target control as the main window, but writing to this video
          only — so "Compress" is never a mystery about what it will produce. -->

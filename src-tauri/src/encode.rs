@@ -1192,7 +1192,15 @@ pub fn can_pass_through(
         .unwrap_or("")
         .to_lowercase();
 
-    matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "webm")
+    // Stills are handed over as they are whenever they fit, which is nearly
+    // always — a photo from a post is a few hundred kilobytes against a ten
+    // megabyte limit. Re-encoding one to "save" space it isn't using would
+    // cost quality for nothing, and the bitrate arithmetic below has no
+    // meaning for something with no duration.
+    matches!(
+        ext.as_str(),
+        "mp4" | "m4v" | "mov" | "webm" | "jpg" | "jpeg" | "png" | "gif" | "webp"
+    )
 }
 
 /// Strips anything Windows or the user would object to in a filename.

@@ -5,12 +5,14 @@
   import AdvancedPanel from "./lib/components/AdvancedPanel.svelte";
   import DropZone from "./lib/components/DropZone.svelte";
   import Editor from "./lib/components/Editor.svelte";
+  import GroupCard from "./lib/components/GroupCard.svelte";
   import JobCard from "./lib/components/JobCard.svelte";
   import TargetPicker from "./lib/components/TargetPicker.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
   import Tour from "./lib/components/Tour.svelte";
   import UpdateBanner from "./lib/components/UpdateBanner.svelte";
   import { app } from "./lib/state.svelte";
+  import type { Job } from "./lib/types";
   import { updater } from "./lib/updater.svelte";
 
   let hovering = $state(false);
@@ -47,6 +49,38 @@
    * arrived, which is what batch drops and everything reading it expect.
    */
   let ordered = $derived([...app.jobs].reverse());
+
+  /**
+   * The list as rows: a lone job is its own row, and everything that came out
+   * of the same post shares one.
+   *
+   * Grouping happens here rather than in the state, so nothing downstream has
+   * to know that groups exist — the queue, the editor and dragging a file out
+   * all still deal in ordinary jobs.
+   */
+  let rows = $derived.by(() => {
+    const out: { key: string; items: Job[] }[] = [];
+    const seen = new Map<string, { key: string; items: Job[] }>();
+
+    for (const job of ordered) {
+      if (!job.groupId) {
+        out.push({ key: job.id, items: [job] });
+        continue;
+      }
+      const existing = seen.get(job.groupId);
+      if (existing) {
+        // The display order is reversed, so the post's own order is restored
+        // by putting each later sibling in front of the ones already seen.
+        existing.items.unshift(job);
+        continue;
+      }
+      const row = { key: job.groupId, items: [job] };
+      seen.set(job.groupId, row);
+      out.push(row);
+    }
+
+    return out;
+  });
   let hasFinished = $derived(
     app.jobs.some((j) => j.status !== "running" && j.status !== "queued"),
   );
@@ -129,8 +163,12 @@
 
         {#if hasJobs}
           <div class="jobs">
-            {#each ordered as job (job.id)}
-              <JobCard {job} />
+            {#each rows as row (row.key)}
+              {#if row.items.length > 1}
+                <GroupCard items={row.items} />
+              {:else}
+                <JobCard job={row.items[0]} />
+              {/if}
             {/each}
           </div>
         {/if}

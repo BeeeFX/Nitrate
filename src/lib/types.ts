@@ -137,7 +137,22 @@ export interface Job {
    * hasn't been given its own answer.
    */
   settings: Settings | null;
+  /**
+   * The post this came out of, when a single link held several things.
+   *
+   * Grouping is kept as a tag on ordinary jobs rather than a separate kind of
+   * job: everything downstream — the queue, the editor, compressing, dragging
+   * one out — works the same whether an item arrived alone or with three
+   * siblings, and only the list has to know the difference.
+   */
+  groupId: string | null;
+  /** What the post was called, shown on the group's own row. */
+  groupTitle: string | null;
+  /** What this item is, when it came from a post. */
+  mediaKind: MediaKind | null;
 }
+
+export type MediaKind = "photo" | "gif" | "video";
 
 export interface Capabilities {
   hardwareEncoders: string[];

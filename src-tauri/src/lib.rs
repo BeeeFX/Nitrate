@@ -97,6 +97,25 @@ struct CancelledEvent {
     id: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchedItem {
+    path: String,
+    kind: media::MediaKind,
+}
+
+/// A post that held more than one thing.
+///
+/// The link job ends here rather than compressing: each item becomes a job of
+/// its own, and they're shown together under the post they came from.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchedEvent {
+    id: String,
+    title: String,
+    items: Vec<FetchedItem>,
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -658,8 +677,14 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
                 std::env::temp_dir().join(format!("nitrate-dl-{}-{}", std::process::id(), id));
             work_dir = Some(dir.clone());
 
-            let fetched = download::fetch(
+            // gallery-dl only matters for the stills yt-dlp can't reach, so a
+            // failure to fetch it isn't fatal — the post still yields whatever
+            // yt-dlp could see.
+            let gallery = download::ensure_gallery(&data_dir).ok();
+
+            let fetched = media::fetch_post(
                 &bin,
+                gallery.as_deref(),
                 &state.bins,
                 &url,
                 &dir,
@@ -668,8 +693,47 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
                 |p| emit(0.05 + p * 0.40, "Downloading"),
             );
 
+            // A post holding several things becomes several jobs. They're
+            // moved out of the temp folder first, because this one is about to
+            // be deleted and the frontend is about to be handed the paths.
+            if let Ok(Ok(items)) = &fetched {
+                if items.len() > 1 {
+                    let mut placed = Vec::new();
+                    for (index, item) in items.iter().enumerate() {
+                        let hint = format!("{title} {}", index + 1);
+                        match encode::place_untouched(&item.path, &settings, Some(&hint)) {
+                            Ok(path) => placed.push(FetchedItem {
+                                path: path.to_string_lossy().into_owned(),
+                                kind: item.kind,
+                            }),
+                            Err(e) => {
+                                let _ = std::fs::remove_dir_all(&dir);
+                                fail(app, e);
+                                finish(app);
+                                return;
+                            }
+                        }
+                    }
+
+                    let _ = std::fs::remove_dir_all(&dir);
+                    let _ = app.emit(
+                        "job://fetched",
+                        FetchedEvent {
+                            id: id.clone(),
+                            title: title.clone(),
+                            items: placed,
+                        },
+                    );
+                    finish(app);
+                    return;
+                }
+            }
+
             match fetched {
-                Ok(Ok(path)) => (path, Some(title)),
+                Ok(Ok(items)) => {
+                    let item = items.into_iter().next().expect("one item");
+                    (item.path, Some(title))
+                }
                 Ok(Err(_cancelled)) => {
                     let _ = std::fs::remove_dir_all(&dir);
                     let _ = app.emit("job://cancelled", CancelledEvent { id: id.clone() });
