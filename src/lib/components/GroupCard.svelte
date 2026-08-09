@@ -58,6 +58,18 @@
   /** The first few posters, so the row shows what's inside while shut. */
   const previews = $derived(items.filter((j) => j.thumbnail).slice(0, 4));
 
+  /**
+   * One bar for the whole post, averaged across its items.
+   *
+   * Each item has its own bar once the group is open, but collapsed — which is
+   * how it spends most of its life — there was nothing at all to say work was
+   * happening.
+   */
+  const overall = $derived(
+    items.reduce((sum, j) => sum + (j.status === "done" ? 1 : j.progress), 0) /
+      Math.max(1, items.length),
+  );
+
   function compressAll() {
     for (const job of items) {
       if (job.status === "queued" || job.status === "held") void app.start(job.id);
@@ -132,6 +144,12 @@
       </button>
     </div>
   </div>
+
+  {#if working}
+    <div class="bar" aria-hidden="true">
+      <span style:width="{Math.round(overall * 100)}%"></span>
+    </div>
+  {/if}
 
   {#if open}
     <!-- `slide` rather than a height animation: the contents are a variable
@@ -270,6 +288,19 @@
 
   .dim-act {
     color: var(--text-faint);
+  }
+
+  .bar {
+    height: 2px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+  }
+
+  .bar span {
+    display: block;
+    height: 100%;
+    background: var(--blurple-bright);
+    transition: width 0.25s ease;
   }
 
   .inner {

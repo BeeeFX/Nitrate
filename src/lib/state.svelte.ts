@@ -272,12 +272,23 @@ class AppStore {
       // The post's own id becomes the group's, so the items sit exactly where
       // the link was rather than jumping to the end of the list.
       const groupId = payload.id;
+      // Already finished, not waiting to start.
+      //
+      // These were downloaded and moved into the output folder before this
+      // event was sent — the file is on disk and there is nothing left to do
+      // to it. Creating them as queued left every item sitting on "Reading…"
+      // with a progress bar, waiting for work that had already happened, and
+      // the group stuck at "0 of 9 done".
       const made: Job[] = payload.items.map((item) => ({
         ...this.#blankJob(`job-${nextId++}`, "file"),
         path: item.path,
         name: item.path.split(/[\\/]/).pop() ?? payload.title,
-        status: "queued",
-        stage: "Reading…",
+        status: "done",
+        stage: "Done",
+        progress: 1,
+        output: item.path,
+        // Nothing was re-encoded: it arrived as it is.
+        passedThrough: true,
         groupId,
         groupTitle: payload.title,
         mediaKind: item.kind,
@@ -591,6 +602,14 @@ class AppStore {
       const details = await invoke<FileInfo>("inspect_file", { path: job.path });
       job.info = details.info;
       job.thumbnail = details.thumbnail;
+
+      // An item that arrived already finished has no encode to report a size,
+      // so the file it points at is the answer.
+      if (job.status === "done" && job.finalBytes === null) {
+        job.finalBytes = details.info.sizeBytes;
+        job.originalBytes ??= details.info.sizeBytes;
+      }
+
       await this.#loadPlan(job);
     } catch {
       // The file may have been moved or deleted; leave what we have.
