@@ -471,6 +471,36 @@ const COPIED = [
  */
 const COPIED_IF_SET = ["padding-left", "padding-right"];
 
+/** Every button or link in a row, including those inside shadow roots. */
+function collectCandidates(row, button) {
+  const found = Array.from(row?.querySelectorAll?.("button, a") ?? []);
+
+  // A slot has no descendants of its own — the content it displays lives
+  // elsewhere and is only projected into place. Reddit's opened post puts the
+  // action row in one, so searching it returned nothing at all and the button
+  // quietly kept our default grey while the feed matched perfectly. The
+  // neighbours either side are the thing we actually want to look like.
+  for (const near of [button?.previousElementSibling, button?.nextElementSibling]) {
+    if (!near || near.hasAttribute?.(MARK)) continue;
+    if (near.matches?.("button, a")) found.push(near);
+    found.push(...(near.querySelectorAll?.("button, a") ?? []));
+    if (near.shadowRoot) found.push(...near.shadowRoot.querySelectorAll("button, a"));
+  }
+
+  if (!site.deep || !row?.querySelectorAll) return found;
+
+  const queue = Array.from(row.querySelectorAll("*"));
+  while (queue.length) {
+    const node = queue.shift();
+    const shadow = node.shadowRoot;
+    if (!shadow) continue;
+    found.push(...shadow.querySelectorAll("button, a"));
+    queue.push(...shadow.querySelectorAll("*"));
+  }
+
+  return found;
+}
+
 function adoptStyle(button, row) {
   let read;
   try {
@@ -482,7 +512,12 @@ function adoptStyle(button, row) {
 
   // Links count as well as buttons: Twitch's "Watch Full Video" is an anchor
   // styled identically to the buttons beside it.
-  const candidates = Array.from(row.querySelectorAll?.("button, a") ?? []).filter(
+  //
+  // On a shadow-DOM site the neighbour worth copying is itself inside a shadow
+  // root — Reddit's share control is a custom element wrapping the real button
+  // — so a plain query finds nothing and the button keeps our default grey,
+  // which sits darker than Reddit's own chips.
+  const candidates = collectCandidates(row, button).filter(
     (candidate) => !candidate.hasAttribute(MARK),
   );
   if (!candidates.length) return;
