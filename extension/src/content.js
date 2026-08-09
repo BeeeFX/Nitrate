@@ -149,13 +149,21 @@ const SITES = [
     matches: () => /(^|\.)reddit\.com$/.test(location.hostname),
     scope: "shreddit-post",
     label: true,
+    // Its posts are custom elements that hide their controls in shadow roots.
+    deep: true,
     // Deliberately not the credit bar: that's the byline above the title, which
     // is where the button ended up looking like a stray banner. These all sit
     // in the vote/comment/share row along the bottom, where it belongs.
     anchors: [
+      // Ordered by how specific they are. The share control is the one that
+      // sits at the end of the action row on every layout — feed, opened post
+      // and community page alike — which is why the button appeared in three
+      // different places depending on where you were.
       { sel: "shreddit-post-share-button", placement: "after" },
       { sel: '[data-post-click-location="share"]', placement: "after" },
-      { sel: 'shreddit-post [slot="full-post-link"] ~ div [data-testid="comments-action-button"]', placement: "after" },
+      { sel: 'button[aria-label="Share" i]', placement: "after" },
+      { sel: '[data-post-click-location="comments-button"]', placement: "after" },
+      { sel: 'button[aria-label*="comment" i]', placement: "after" },
     ],
     resolve: (scope) => {
       const permalink = scope?.getAttribute("permalink");
@@ -287,7 +295,17 @@ function findActionClusters(root) {
 
   const icons = Array.from(
     scope.querySelectorAll("svg[aria-label], svg[role='img']"),
-  ).filter((icon) => !icon.closest?.(CHROME));
+  ).filter((icon) => {
+    if (icon.closest?.(CHROME)) return false;
+
+    // Ignore anything small. A post's own controls are drawn at 20-24px, while
+    // the like button on each comment is nearer 12px — and a comment thread
+    // holds far more of them, so the smallest cluster of three was often three
+    // comments rather than the post. That's how the button ended up down in the
+    // replies on Instagram.
+    const box = icon.getBoundingClientRect?.();
+    return !box || box.width === 0 || box.width >= 18;
+  });
   if (icons.length < 3) return [];
 
   const counts = new Map();
@@ -326,12 +344,43 @@ function findActionClusters(root) {
   return chosen.map((c) => c.node);
 }
 
+/**
+ * `querySelector`, but able to see inside shadow roots.
+ *
+ * Reddit builds its posts from custom elements that keep their innards in a
+ * shadow root, so `shreddit-post-share-button` is genuinely present and
+ * genuinely invisible to an ordinary query. Every Reddit anchor missed for that
+ * reason, which is why the button kept ending up wherever the structural search
+ * happened to land — usually the post header.
+ */
+function deepQuery(root, selector) {
+  if (!root?.querySelectorAll) return null;
+
+  const direct = root.querySelector(selector);
+  if (direct) return direct;
+
+  // Breadth-first through open shadow roots. Closed ones stay invisible, but
+  // nothing here uses them.
+  const queue = Array.from(root.querySelectorAll("*"));
+  while (queue.length) {
+    const node = queue.shift();
+    const shadow = node.shadowRoot;
+    if (!shadow) continue;
+
+    const found = shadow.querySelector(selector);
+    if (found) return found;
+    queue.push(...shadow.querySelectorAll("*"));
+  }
+
+  return null;
+}
+
 function findAnchor(root) {
   for (const entry of site.anchors) {
     const { sel, up = 0, placement } = typeof entry === "string" ? { sel: entry } : entry;
     let match = null;
     try {
-      match = root.querySelector?.(sel) ?? null;
+      match = (site.deep ? deepQuery(root, sel) : root.querySelector?.(sel)) ?? null;
     } catch {
       // `:has()` and custom elements aren't universally supported; a bad
       // selector shouldn't take the whole scan down.
@@ -477,6 +526,19 @@ function scan() {
     const anchor = findAnchor(root);
 
     if (anchor) {
+      // Re-home a button the page has moved on from.
+      //
+      // These are all single-page apps: navigating swaps the content without
+      // reloading, and a button placed against the old page either sits in the
+      // wrong row or hangs off a detached node. It looked like "the button
+      // doesn't appear until you refresh" on YouTube, and like a stray corner
+      // button after going back on Reddit. Anything no longer sitting in the
+      // anchor we'd choose now is dropped so this pass can place it properly.
+      for (const stray of root.querySelectorAll?.(`[${MARK}]:not(.nitrate-floating)`) ?? []) {
+        const home = anchor.placement === "after" ? anchor.node.parentElement : anchor.node;
+        if (!stray.isConnected || stray.parentElement !== home) stray.remove();
+      }
+
       // The floating button has to be excluded here. It lives on `body`, so on
       // a page with no scope it counts as "already done" and every later scan
       // short-circuits — meaning if the fallback ever appears before the action
@@ -739,13 +801,21 @@ function injectStyles() {
     .nitrate-send[data-site="instagram"]:hover { background: none; opacity: .6; }
     .nitrate-send[data-site="instagram"] .nitrate-icon { width: 24px; height: 24px; }
 
-    /* X packs its row tightly and sizes icons at 18px. */
+    /*
+     * X packs its row tightly, and the row is only as tall as its tallest
+     * child. A fixed 34px button was taller than everything beside it, so it
+     * stretched the whole action row — which on a timeline pushed every tweet
+     * below it down and made the feed jump as posts loaded. Sized by its
+     * padding instead, so it can never be the tallest thing in the row.
+     */
     .nitrate-send[data-site="x"] {
-      height: 34px;
+      height: auto;
+      align-self: center;
+      padding: 4px;
       background: none;
       margin: 0;
     }
-    .nitrate-send[data-site="x"]:not(:has(.nitrate-label)) { width: 34px; }
+    .nitrate-send[data-site="x"]:not(:has(.nitrate-label)) { width: auto; }
     .nitrate-send[data-site="x"]:hover { background: rgba(88,101,242,.14); }
     .nitrate-send[data-site="x"] .nitrate-icon { width: 18px; height: 18px; }
 

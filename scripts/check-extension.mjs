@@ -119,6 +119,11 @@ function makeElement(tag = "div", attrs = {}) {
       }
       return null;
     },
+    // Present so the shadow-piercing search has something to ask about. No
+    // fixture uses one, which is itself worth noting: the Reddit fix this
+    // supports can't be proven here.
+    shadowRoot: null,
+    isConnected: true,
     querySelector: (selector) => descendants(element).find((n) => matches(n, selector)) ?? null,
     querySelectorAll: (selector) => descendants(element).filter((n) => matches(n, selector)),
     getBoundingClientRect: () => element.rect,
