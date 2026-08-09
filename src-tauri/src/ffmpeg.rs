@@ -245,9 +245,18 @@ pub fn thumbnail(
     at: f64,
     width: u32,
 ) -> Result<(), String> {
-    let status = base_command(&bins.ffmpeg)
-        .args(["-y", "-ss"])
-        .arg(format!("{at:.3}"))
+    let mut cmd = base_command(&bins.ffmpeg);
+    cmd.arg("-y");
+
+    // No seek for a still. A photo probes as roughly a fortieth of a second
+    // long, so seeking a quarter of the way in lands past the end and ffmpeg
+    // returns nothing — which is why photo cards sat on the placeholder while
+    // their dimensions were read perfectly well.
+    if at > 0.05 {
+        cmd.arg("-ss").arg(format!("{at:.3}"));
+    }
+
+    let status = cmd
         .arg("-i")
         .arg(input)
         .args(["-frames:v", "1", "-vf"])

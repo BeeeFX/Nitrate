@@ -829,6 +829,22 @@ fn build_args(
     if let Some(crop) = edits.crop_filter(info.width, info.height) {
         filters.push(crop);
     }
+
+    // A still is one frame written back as a picture, not a video encode.
+    //
+    // Everything below assumes a timeline — a codec, a bitrate or a CRF, an
+    // audio stream — and none of it applies. Running a photo through it is why
+    // cropping one appeared to do nothing: the crop was correct, but the result
+    // was an attempt at a video of a single frame rather than the image back.
+    if still_extension(input).is_some() {
+        let mut args = vec![s("-y"), s("-i"), input.to_string_lossy().into_owned()];
+        if !filters.is_empty() {
+            args.extend([s("-vf"), filters.join(",")]);
+        }
+        args.extend([s("-frames:v"), s("1"), s("-q:v"), s("2")]);
+        args.push(output.to_string_lossy().into_owned());
+        return args;
+    }
     if plan.height != cropped_height || plan.width != cropped_width {
         filters.push(format!("scale=-2:{}:flags=lanczos", plan.height));
     }
@@ -1163,6 +1179,20 @@ pub fn run_job(
 /// honest answer to "make this 10 MB" for an 8 MB clip is to do nothing. The
 /// container still has to be one Discord previews inline, otherwise "it fits"
 /// would be technically true and practically useless.
+/// The extension of a still, or `None` for anything with a timeline.
+///
+/// A GIF is deliberately absent: it has frames, so it goes down the video path
+/// like everything else that moves.
+pub fn still_extension(input: &Path) -> Option<&'static str> {
+    let ext = input.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => Some("jpg"),
+        "png" => Some("png"),
+        "webp" => Some("webp"),
+        _ => None,
+    }
+}
+
 pub fn can_pass_through(
     info: &MediaInfo,
     settings: &Settings,
@@ -1303,7 +1333,10 @@ fn output_path(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "video".into()),
     };
-    let ext = settings.container.extension();
+    // A still keeps the format it arrived in. Writing a cropped photo into an
+    // MP4 container would be nonsense, and the container setting is about
+    // video — it has nothing to say about a JPEG.
+    let ext = still_extension(input).unwrap_or_else(|| settings.container.extension());
 
     let mut candidate = dir.join(format!("{stem}-nitrate.{ext}"));
     let mut n = 2;

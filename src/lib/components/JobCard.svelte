@@ -64,6 +64,9 @@
 
   const draggable = $derived(job.status === "done" && Boolean(job.output));
 
+  /** A photo: no duration, no frame rate, nothing to trim or compress. */
+  const isStill = $derived(job.mediaKind === "photo");
+
   /**
    * The picture that follows the cursor, as a PNG.
    *
@@ -245,6 +248,16 @@
           <span class="arrow">→</span>
           <span class="to">{formatSize(job.finalBytes)}</span>
           {#if saved !== null}<span class="saved">−{saved}%</span>{/if}
+        {:else if job.info && isStill}
+          <!-- A still has no duration, no frame rate and no bitrate. ffprobe
+               reports it as about a fortieth of a second long, which turned the
+               derived figures into nonsense: "0:00", a resolution quoted as
+               "1312p", and a bitrate of 768 Mbps that was really the file size
+               divided by that imaginary duration. Its size and its dimensions
+               are the only two facts here that mean anything. -->
+          <span>{formatSize(job.info.sizeBytes)}</span>
+          <span class="dot">·</span>
+          <span>{job.info.width} × {job.info.height}</span>
         {:else if job.info}
           <span>{formatSize(job.info.sizeBytes)}</span>
           <span class="dot">·</span>

@@ -23,6 +23,14 @@
   );
   const failed = $derived(items.filter((j) => j.status === "failed").length);
 
+  /**
+   * A post of nothing but photos has nothing to compress.
+   *
+   * They are handed over as they arrive, so a Compress button would promise
+   * work that never happens and then report "done" for having done nothing.
+   */
+  const anythingToCompress = $derived(items.some((j) => j.mediaKind !== "photo"));
+
   /** Only meaningful once everything has finished; partial totals mislead. */
   const totalBytes = $derived(
     done === items.length
@@ -105,7 +113,7 @@
     </button>
 
     <div class="acts">
-      {#if items.some((j) => j.status === "queued" || j.status === "held")}
+      {#if anythingToCompress && items.some((j) => j.status === "queued" || j.status === "held")}
         <button class="act" onclick={compressAll} title="Compress all of them">
           <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor" /></svg>
         </button>

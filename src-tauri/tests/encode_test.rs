@@ -648,3 +648,67 @@ fn keep_mode_leaves_an_unedited_file_completely_alone() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn cropping_a_photo_writes_a_photo() {
+    let dir = temp_dir("photo-crop");
+    let input = dir.join("shot.jpg");
+
+    let bins = ffmpeg::resolve();
+    let ok = std::process::Command::new(&bins.ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-f", "lavfi", "-i", "testsrc2=size=1080x1350"])
+        .args(["-frames:v", "1"])
+        .arg(&input)
+        .status()
+        .expect("ffmpeg should run");
+    assert!(ok.success(), "couldn't build the test photo");
+
+    let info = ffmpeg::probe(&bins, &input).expect("a photo should probe");
+    let set = settings(10_000_000, &dir);
+
+    // Half the frame, centred — the crop the editor produces.
+    let edits = Edits {
+        start: None,
+        end: None,
+        crop: Some(CropRect {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+        }),
+    };
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("cropping a photo should succeed")
+        .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    // It has to come back as a picture, not as a one-frame video wearing a
+    // .jpg name — which is what happened before stills got their own path.
+    assert_eq!(
+        outcome.output.extension().and_then(|e| e.to_str()),
+        Some("jpg"),
+        "expected a .jpg, got {:?}",
+        outcome.output
+    );
+    let head = std::fs::read(&outcome.output).expect("readable");
+    assert_eq!(&head[0..2], &[0xFF, 0xD8], "not a JPEG");
+
+    let out = ffmpeg::probe(&bins, &outcome.output).expect("output should probe");
+    assert_eq!(out.width, 540, "crop should have halved the width");
+    assert!(
+        (out.height as i32 - 675).abs() <= 2,
+        "height was {}",
+        out.height
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
