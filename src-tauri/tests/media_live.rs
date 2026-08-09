@@ -188,3 +188,44 @@ fn a_reddit_photo_post_comes_back_as_an_image() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+#[ignore = "needs the network"]
+fn an_x_photo_post_comes_back_through_gallery_dl() {
+    let dir = std::env::temp_dir().join("nitrate-live-xphoto");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let gallery = dirs_bin().join("gallery-dl.exe");
+    if !gallery.is_file() {
+        eprintln!("skipped: gallery-dl isn't installed yet");
+        return;
+    }
+
+    let bins = ffmpeg::resolve();
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    // X returns nothing at all for a photo tweet — no formats, no thumbnails —
+    // so this is the one path that genuinely depends on the second tool.
+    let items = media::fetch_post(
+        &yt_dlp(),
+        Some(&gallery),
+        &bins,
+        "https://x.com/i/status/2085248162445373578",
+        &dir,
+        1080,
+        &cancel,
+        |_| {},
+    )
+    .expect("fetching should not error")
+    .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    for item in &items {
+        let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+        println!("  {:?}  {:?}  {size} bytes", item.kind, item.path.file_name().unwrap());
+    }
+
+    assert!(!items.is_empty(), "nothing came back from the tweet");
+    assert!(items.iter().any(|i| i.kind == media::MediaKind::Photo));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
