@@ -11,12 +11,18 @@
 //! |-----------|-------------------------|--------------------------|
 //! | Instagram | yt-dlp, no login needed | as video                 |
 //! | X         | gallery-dl              | yt-dlp, `tweet_video`    |
-//! | Reddit    | gallery-dl              | as video                 |
+//! | Reddit    | blocked, see below      | as video                 |
 //!
 //! Instagram serves a photo post's images through the field yt-dlp reports as
 //! "thumbnails", and the largest is the genuine original — 1080x1350 on the
 //! post this was tested against, not a preview. X hands back nothing at all for
 //! a photo tweet, which is what gallery-dl is here for.
+//!
+//! Reddit images cannot be fetched at all without signing in. It answers a
+//! non-browser request with its web page instead of data, so gallery-dl tries
+//! to parse HTML as JSON and dies on the first character — and its own public
+//! .json endpoint does the same. Reddit videos still work, because those go
+//! through yt-dlp by a different route.
 
 use crate::ffmpeg::{Binaries, Cancelled};
 use serde::{Deserialize, Serialize};
@@ -367,10 +373,39 @@ fn fetch_with_gallery(
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        if err.contains("login") {
+        let lower = err.to_lowercase();
+
+        // Reddit answers a non-browser request with its web page rather than
+        // data, so the extractor tries to parse HTML as JSON and dies on the
+        // first character. Nothing here can fix that — it's Reddit declining to
+        // be read programmatically, and the same wall its own public .json
+        // endpoint now puts up. Worth saying plainly rather than reporting a
+        // generic failure the user could waste time retrying.
+        if lower.contains("jsondecodeerror") || lower.contains("expecting value") {
+            return Err(
+                "Reddit is refusing automated access at the moment, so its images \
+                 can't be fetched. Videos still work."
+                    .into(),
+            );
+        }
+        if lower.contains("429") || lower.contains("too many requests") {
+            return Err("That site is asking us to slow down. Wait a minute and try again.".into());
+        }
+        if lower.contains("login") || lower.contains("account") {
             return Err("That post needs an account to view.".into());
         }
-        return Err("Couldn't download the images from that post.".into());
+
+        // Anything else keeps its own words. A single catch-all message told
+        // nobody anything, this one included.
+        let detail = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no reason given")
+            .trim();
+        return Err(format!(
+            "Couldn't download the images from that post: {detail}"
+        ));
     }
 
     // gallery-dl builds its own folders under the destination, so collect

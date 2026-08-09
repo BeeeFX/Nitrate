@@ -444,7 +444,10 @@ fn summarise_yt_dlp_error(stderr: &str) -> String {
         "That channel isn't live right now.".into()
     } else if lower.contains("live stream") && lower.contains("not available") {
         "That live stream can't be downloaded — wait until it has finished.".into()
-    } else if lower.contains("unsupported url") {
+    } else if lower.starts_with("unsupported url") {
+        // Anchored to the start. Matching it anywhere labelled a Reddit link
+        // "not supported" because the phrase appeared somewhere inside a
+        // longer failure, which sent people looking for the wrong problem.
         "That site isn't supported.".into()
     } else if lower.contains("private") || lower.contains("login") || lower.contains("cookies") {
         "That video is private or needs a sign-in.".into()
