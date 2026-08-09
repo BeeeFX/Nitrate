@@ -481,6 +481,23 @@ fn fetch_photo(url: &str, work_dir: &Path, index: usize) -> Result<PathBuf, Stri
     Ok(target)
 }
 
+/// What a downloaded file is, from the extension it arrived with.
+///
+/// The site already decided this. A `.gif` is a GIF wherever it came from, and
+/// the promise is that each thing comes back as whatever it already was.
+fn kind_from_extension(path: &Path) -> MediaKind {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mp4") | Some("webm") | Some("mkv") => MediaKind::Video,
+        Some("gif") => MediaKind::Gif,
+        _ => MediaKind::Photo,
+    }
+}
+
 /// The file extension a URL implies, ignoring any query string after it.
 fn extension_from_url(url: &str) -> Option<&str> {
     let path = url.split('?').next()?;
@@ -572,10 +589,12 @@ pub fn fetch_post(
         match item {
             Planned::Photo(src) => {
                 let path = fetch_photo(src, work_dir, done)?;
-                items.push(MediaItem {
-                    path,
-                    kind: MediaKind::Photo,
-                });
+                // A Reddit gallery can hold GIFs alongside its photos — it's
+                // the one thing besides images they're allowed to contain — and
+                // calling one a photo would hand back a still of its first
+                // frame. What it is comes from what arrived.
+                let kind = kind_from_extension(&path);
+                items.push(MediaItem { path, kind });
             }
             Planned::Playable { index, gif } => {
                 let path = fetch_playable(yt, bins, url, work_dir, max_height, *index, done)?;
@@ -718,16 +737,7 @@ fn fetch_with_gallery(
     Ok(found
         .into_iter()
         .map(|path| {
-            let kind = match path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-                .as_deref()
-            {
-                Some("mp4") | Some("webm") | Some("mkv") => MediaKind::Video,
-                Some("gif") => MediaKind::Gif,
-                _ => MediaKind::Photo,
-            };
+            let kind = kind_from_extension(&path);
             MediaItem { path, kind }
         })
         .collect())
