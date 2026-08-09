@@ -338,6 +338,22 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
     let resolved = crate::media::canonical_url(url);
     let url = resolved.as_str();
 
+    // Same shortcut the fetch takes: a Reddit post of only images is read from
+    // its page. Going to yt-dlp first meant waiting out the API's rate limit
+    // before reaching a route that was never blocked — and this is also the
+    // only path that knows the post's title, so the card can stop saying
+    // "Reddit" and say what the post is called.
+    if let Some(page) = crate::media::reddit_page(url) {
+        if !page.images.is_empty() && !page.has_video {
+            return Ok(UrlInfo {
+                title: page.title,
+                duration: None,
+                site: "Reddit".to_string(),
+                webpage_url: url.to_string(),
+            });
+        }
+    }
+
     pace();
 
     let mut child = base_command(bin)

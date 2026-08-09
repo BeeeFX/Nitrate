@@ -182,6 +182,18 @@ fn run_capped(cmd: &mut Command, limit: Duration) -> Option<Output> {
 
 /// Asks yt-dlp what's in a post without downloading any of it.
 fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
+    // A Reddit post of nothing but images is answered from its page, which the
+    // API rate limit doesn't touch. It also names every image in a gallery,
+    // and it takes about a second where the throttled API takes a minute.
+    if let Some(page) = reddit_page(url) {
+        if !page.images.is_empty() && !page.has_video {
+            return Plan {
+                items: page.images.into_iter().map(Planned::Photo).collect(),
+                trouble: None,
+            };
+        }
+    }
+
     crate::download::pace();
 
     let mut cmd = base_command(yt);
@@ -308,6 +320,89 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .user_agent("nitrate")
         .build()
         .map_err(|e| format!("Couldn't start the download: {e}"))
+}
+
+/// What a Reddit post shows, read from the page instead of the API.
+pub struct RedditPage {
+    /// The post's own title, which the API path never gets us — cards showed
+    /// the bare word "Reddit".
+    pub title: String,
+    pub images: Vec<String>,
+    /// A post holding video is left to yt-dlp, which handles it properly.
+    pub has_video: bool,
+}
+
+/// Reads a Reddit post from its old front end.
+///
+/// Reddit rate-limits its data API hard, and yt-dlp then backs off for about a
+/// minute — measured repeatedly against a post a browser was serving the whole
+/// time. The old front end answers an ordinary request with plain HTML, and it
+/// lists every image in a gallery, where the API refusal we otherwise read
+/// names only one of them.
+pub fn reddit_page(url: &str) -> Option<RedditPage> {
+    let path = url.split('?').next().unwrap_or(url);
+    if !path.contains("/comments/") {
+        return None;
+    }
+    let (_, rest) = path.split_once("reddit.com/")?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("nitrate")
+        .build()
+        .ok()?;
+    let html = client
+        .get(format!("https://old.reddit.com/{rest}"))
+        .send()
+        .ok()?
+        .text()
+        .ok()?;
+
+    // Comments carry images of their own and they are not what was asked for.
+    // Everything from where they begin is ignored.
+    let post = html.split("commentarea").next().unwrap_or(&html);
+
+    let mut images = Vec::new();
+    for prefix in ["https://preview.redd.it/", "https://i.redd.it/"] {
+        for piece in post.split(prefix).skip(1) {
+            let name: String = piece
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                .collect();
+
+            // preview.redd.it refuses a plain request with 403 while i.redd.it
+            // serves the same name at full size, so everything is taken from
+            // there whichever host the page happened to mention.
+            let full = format!("https://i.redd.it/{name}");
+            if extension_from_url(&full).is_some_and(|ext| ext != "mp4" && ext != "webm")
+                && !images.contains(&full)
+            {
+                images.push(full);
+            }
+        }
+    }
+
+    Some(RedditPage {
+        title: reddit_title(post).unwrap_or_else(|| "Reddit".into()),
+        has_video: post.contains("v.redd.it"),
+        images,
+    })
+}
+
+/// The post's title, without the " : subreddit" the page appends to it.
+fn reddit_title(html: &str) -> Option<String> {
+    let (_, after) = html.split_once("<title>")?;
+    let (raw, _) = after.split_once("</title>")?;
+    let trimmed = raw.rsplit_once(" : ").map_or(raw, |(before, _)| before);
+    let text = trimmed
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">");
+
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.chars().take(120).collect())
 }
 
 /// `reddit.com/r/<sub>/s/<id>` — the shape the Share button produces.
@@ -741,6 +836,34 @@ mod tests {
 #[cfg(test)]
 mod reddit_tests {
     use super::*;
+
+    #[test]
+    fn takes_the_post_title_off_the_page() {
+        let html = "<title>i have this optical illusion : interesting</title>";
+        assert_eq!(
+            reddit_title(html).as_deref(),
+            Some("i have this optical illusion")
+        );
+    }
+
+    #[test]
+    fn puts_escaped_characters_back_the_way_they_read() {
+        let html = "<title>Bob&#39;s &quot;best&quot; cat &amp; dog : aww</title>";
+        assert_eq!(
+            reddit_title(html).as_deref(),
+            Some("Bob's \"best\" cat & dog")
+        );
+    }
+
+    #[test]
+    fn keeps_a_title_that_has_a_colon_of_its_own() {
+        // Only the last " : " is the subreddit the page appends.
+        let html = "<title>TIL : the deepest lake : todayilearned</title>";
+        assert_eq!(
+            reddit_title(html).as_deref(),
+            Some("TIL : the deepest lake")
+        );
+    }
 
     #[test]
     fn spots_a_share_link_in_the_shapes_it_arrives_in() {

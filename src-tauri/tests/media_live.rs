@@ -207,6 +207,48 @@ fn a_reddit_share_link_resolves_to_the_post() {
 
 #[test]
 #[ignore = "needs the network"]
+fn a_reddit_gallery_gives_up_every_image() {
+    let dir = std::env::temp_dir().join("nitrate-live-gallery");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let bins = ffmpeg::resolve();
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    // Two images. The API refusal we read elsewhere names one image, so a post
+    // like this is the case that route can't serve — and this post was being
+    // rate-limited by Reddit's API for an hour while its page loaded fine.
+    let items = media::fetch_post(
+        &yt_dlp(),
+        None,
+        &bins,
+        "https://www.reddit.com/r/interesting/comments/1vjv949/i_have_this_optical_illusion_since_many_years_ago/",
+        &dir,
+        1080,
+        &cancel,
+        |_| {},
+    )
+    .expect("fetching should not error")
+    .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    for item in &items {
+        let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+        println!("  {:?}  {:?}  {size} bytes", item.kind, item.path.file_name().unwrap());
+    }
+
+    assert_eq!(items.len(), 2, "the post holds two images");
+    assert!(items.iter().all(|i| i.kind == media::MediaKind::Photo));
+    assert!(
+        items
+            .iter()
+            .all(|i| std::fs::metadata(&i.path).unwrap().len() > 10_000),
+        "real images, not error pages saved to disk"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "needs the network"]
 fn a_reddit_photo_post_comes_back_as_an_image() {
     let dir = std::env::temp_dir().join("nitrate-live-reddit");
     let _ = std::fs::remove_dir_all(&dir);
