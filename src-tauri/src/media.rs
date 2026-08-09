@@ -147,8 +147,20 @@ fn run_capped(cmd: &mut Command, limit: Duration) -> Option<Output> {
     let (tx_err, rx_err) = std::sync::mpsc::channel();
 
     for (handle, tx) in [
-        (pipes.0.take().map(|h| Box::new(h) as Box<dyn std::io::Read + Send>), tx_out),
-        (pipes.1.take().map(|h| Box::new(h) as Box<dyn std::io::Read + Send>), tx_err),
+        (
+            pipes
+                .0
+                .take()
+                .map(|h| Box::new(h) as Box<dyn std::io::Read + Send>),
+            tx_out,
+        ),
+        (
+            pipes
+                .1
+                .take()
+                .map(|h| Box::new(h) as Box<dyn std::io::Read + Send>),
+            tx_err,
+        ),
     ] {
         std::thread::spawn(move || {
             let mut buf = Vec::new();

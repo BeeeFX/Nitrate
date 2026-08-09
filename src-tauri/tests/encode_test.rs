@@ -291,7 +291,7 @@ fn cropping_changes_the_output_shape() {
             width: 0.5625,
             height: 1.0,
         }),
-            force_encode: false,
+        force_encode: false,
     };
     let (bytes, plan, _) = encode_with_edits(10_000_000, "crop", edits);
 
@@ -606,7 +606,7 @@ fn keep_mode_re_encodes_when_it_has_to() {
             width: 0.5,
             height: 0.5,
         }),
-            force_encode: false,
+        force_encode: false,
     };
 
     let plan = encode::plan(&info, &set, &edits, &bins).expect("plan should succeed");
@@ -683,7 +683,7 @@ fn cropping_a_photo_writes_a_photo() {
             width: 0.5,
             height: 0.5,
         }),
-            force_encode: false,
+        force_encode: false,
     };
 
     let cancel = Arc::new(AtomicBool::new(false));
@@ -747,7 +747,9 @@ fn make_gif(dir: &Path, name: &str, size: &str, fps: u32, secs: u32) -> PathBuf 
 }
 
 fn is_gif_file(path: &Path) -> bool {
-    std::fs::read(path).map(|b| b.starts_with(b"GIF")).unwrap_or(false)
+    std::fs::read(path)
+        .map(|b| b.starts_with(b"GIF"))
+        .unwrap_or(false)
 }
 
 #[test]
@@ -792,7 +794,7 @@ fn an_edited_gif_comes_back_a_gif() {
             width: 0.5,
             height: 0.5,
         }),
-            force_encode: false,
+        force_encode: false,
     };
 
     let set = settings(2_000_000, &dir);
@@ -862,7 +864,7 @@ fn an_edited_gif_still_gets_under_a_size_limit() {
             width: 0.9,
             height: 0.9,
         }),
-            force_encode: false,
+        force_encode: false,
     };
 
     let set = settings(target, &dir);

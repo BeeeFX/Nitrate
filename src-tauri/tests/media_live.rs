@@ -232,7 +232,11 @@ fn a_reddit_gallery_gives_up_every_image() {
 
     for item in &items {
         let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
-        println!("  {:?}  {:?}  {size} bytes", item.kind, item.path.file_name().unwrap());
+        println!(
+            "  {:?}  {:?}  {size} bytes",
+            item.kind,
+            item.path.file_name().unwrap()
+        );
     }
 
     assert_eq!(items.len(), 2, "the post holds two images");
@@ -273,7 +277,11 @@ fn a_reddit_gif_stays_a_gif() {
 
     for item in &items {
         let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
-        println!("  {:?}  {:?}  {size} bytes", item.kind, item.path.file_name().unwrap());
+        println!(
+            "  {:?}  {:?}  {size} bytes",
+            item.kind,
+            item.path.file_name().unwrap()
+        );
     }
 
     assert_eq!(items.len(), 1, "one GIF, named twice on the page");
