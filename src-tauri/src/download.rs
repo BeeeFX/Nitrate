@@ -23,6 +23,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// How long before we go looking for a newer yt-dlp.
 const REFRESH_AFTER: Duration = Duration::from_secs(60 * 60 * 24 * 7);
 
+/// How long to let the probe think before queueing the link anyway.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
+
 fn asset_name() -> &'static str {
     if cfg!(windows) {
         "yt-dlp.exe"
@@ -309,7 +312,7 @@ struct DumpJson {
 
 /// Reads a link's metadata without downloading it.
 pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
-    let output = base_command(bin)
+    let mut child = base_command(bin)
         .args([
             "--no-warnings",
             "--no-playlist",
@@ -324,10 +327,60 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
         ])
         .arg(url)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Couldn't run the downloader: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Drained on a thread rather than left in the pipe. A post with several
+    // items prints a lot of JSON, and a full pipe blocks the child forever —
+    // which would turn the timeout below into the very hang it exists to stop.
+    let piped = child.stdout.take();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(mut out) = piped {
+            use std::io::Read as _;
+            let _ = out.read_to_string(&mut text);
+        }
+        let _ = tx.send(text);
+    });
+
+    // A wall-clock limit on the whole thing. `--socket-timeout` caps individual
+    // sockets, not the command, and on a Reddit gallery yt-dlp can sit there
+    // enumerating long past the point of usefulness — the link then sat on
+    // "Reading link…" indefinitely, with nothing above it willing to give up.
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+    let timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                break true;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(format!("The downloader didn't exit cleanly: {e}")),
+        }
+    };
+
+    // Not an error. What the post holds is worked out when it's fetched, and
+    // that path handles everything this one was still thinking about — so a
+    // slow extractor delays the answer rather than refusing the link.
+    if timed_out {
+        return Ok(UrlInfo {
+            title: site_name(url).to_string(),
+            duration: None,
+            site: site_name(url).to_string(),
+            webpage_url: url.to_string(),
+        });
+    }
+
+    let stdout = rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| String::new());
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("The downloader didn't exit cleanly: {e}"))?;
     let usable = stdout.trim_start().starts_with('{');
 
     // Only a failure if there's nothing to read. yt-dlp still reports a
@@ -382,7 +435,12 @@ fn summarise_yt_dlp_error(stderr: &str) -> String {
     let cleaned = line.replace("ERROR: ", "");
     let lower = cleaned.to_lowercase();
 
-    if lower.contains("not currently live") || lower.contains("live event will begin") {
+    // Reddit in particular refuses in bursts, and yt-dlp retries with backoff
+    // for a long time before surfacing it — so this arrives after a wait that
+    // looks like a hang, with a raw HTTPError that explains nothing to anyone.
+    if lower.contains("429") || lower.contains("too many requests") {
+        "That site is asking us to slow down. Wait a minute and try again.".into()
+    } else if lower.contains("not currently live") || lower.contains("live event will begin") {
         "That channel isn't live right now.".into()
     } else if lower.contains("live stream") && lower.contains("not available") {
         "That live stream can't be downloaded — wait until it has finished.".into()
