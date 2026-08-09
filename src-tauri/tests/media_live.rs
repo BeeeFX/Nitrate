@@ -4,7 +4,7 @@
 //! deleted. Run deliberately with
 //! `cargo test --test media_live -- --ignored --nocapture`.
 
-use nitrate_lib::{ffmpeg, media};
+use nitrate_lib::{download, ffmpeg, media};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -124,4 +124,19 @@ fn an_x_gif_comes_back_as_a_real_gif() {
     println!("gif is {} bytes", head.len());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "needs the network"]
+fn a_photo_post_gets_past_the_probe() {
+    // Both of these were rejected at the probe step in 0.8.0, before the media
+    // pipeline could look at them — the failure users actually saw.
+    for url in [
+        "https://x.com/i/status/2085248162445373578",
+        "https://www.instagram.com/p/DbqvFwciSjr/",
+    ] {
+        let info = download::probe_url(&yt_dlp(), url)
+            .unwrap_or_else(|e| panic!("{url} was refused at the probe: {e}"));
+        println!("ok  {url} -> {:?}", info.title);
+    }
 }

@@ -314,6 +314,11 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
             "--no-warnings",
             "--no-playlist",
             "--dump-single-json",
+            // A post made of photos has no video formats, and without this
+            // yt-dlp calls that fatal. This runs before anything is fetched, so
+            // treating it as fatal here rejected every image post at the door —
+            // the media pipeline that handles them never got a chance to look.
+            "--ignore-no-formats-error",
             "--socket-timeout",
             "20",
         ])
@@ -322,13 +327,30 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
         .output()
         .map_err(|e| format!("Couldn't run the downloader: {e}"))?;
 
-    if !output.status.success() {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let usable = stdout.trim_start().starts_with('{');
+
+    // Only a failure if there's nothing to read. yt-dlp still reports a
+    // non-zero exit for a photo post while printing perfectly good metadata,
+    // so the JSON is what decides, not the exit code.
+    if !output.status.success() && !usable {
         return Err(summarise_yt_dlp_error(&String::from_utf8_lossy(
             &output.stderr,
         )));
     }
 
-    let parsed: DumpJson = serde_json::from_slice(&output.stdout)
+    // Some extractors say nothing at all about a photo post. It's still a link
+    // worth queueing — what it holds is worked out when it's fetched.
+    if !usable {
+        return Ok(UrlInfo {
+            title: site_name(url).to_string(),
+            duration: None,
+            site: site_name(url).to_string(),
+            webpage_url: url.to_string(),
+        });
+    }
+
+    let parsed: DumpJson = serde_json::from_str(&stdout)
         .map_err(|_| "The downloader returned something unexpected for that link.".to_string())?;
 
     if parsed.is_live {
