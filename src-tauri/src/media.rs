@@ -28,10 +28,10 @@
 use crate::ffmpeg::{Binaries, Cancelled};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -114,23 +114,93 @@ fn looks_like_gif(entry: &Entry) -> bool {
         .any(|u| u.contains("tweet_video"))
 }
 
-/// Asks yt-dlp what's in a post without downloading any of it.
-fn plan_from_yt_dlp(yt: &Path, url: &str) -> Vec<Planned> {
-    let Ok(output) = base_command(yt)
-        .args([
-            "--dump-json",
-            // Instagram photo posts have no video formats at all, and without
-            // this yt-dlp treats that as fatal and prints nothing usable.
-            "--ignore-no-formats-error",
-            "--no-warnings",
-            "--socket-timeout",
-            "20",
-        ])
-        .arg(url)
+/// How long to let yt-dlp think about what a post holds.
+///
+/// `--socket-timeout` caps one socket, not the command. A rate-limited Reddit
+/// sends yt-dlp into retries with backoff that ran past two minutes when this
+/// was measured, which is what left a pasted link sitting on "Reading…".
+const PLAN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What a post holds, and why we couldn't tell when we couldn't.
+struct Plan {
+    items: Vec<Planned>,
+    /// Kept for the case where nothing came back and someone has to be told
+    /// something better than "no".
+    trouble: Option<String>,
+}
+
+/// Runs a metadata command under a wall-clock cap.
+///
+/// Both pipes are drained on their own threads: a post with several items
+/// prints enough JSON to fill one, and a full pipe blocks the child forever —
+/// which would turn the cap below into the very hang it exists to prevent.
+fn run_capped(cmd: &mut Command, limit: Duration) -> Option<Output> {
+    let mut child = cmd
         .stdin(Stdio::null())
-        .output()
-    else {
-        return Vec::new();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    let mut pipes = (child.stdout.take(), child.stderr.take());
+    let (tx_out, rx_out) = std::sync::mpsc::channel();
+    let (tx_err, rx_err) = std::sync::mpsc::channel();
+
+    for (handle, tx) in [
+        (pipes.0.take().map(|h| Box::new(h) as Box<dyn std::io::Read + Send>), tx_out),
+        (pipes.1.take().map(|h| Box::new(h) as Box<dyn std::io::Read + Send>), tx_err),
+    ] {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut h) = handle {
+                let _ = h.read_to_end(&mut buf);
+            }
+            let _ = tx.send(buf);
+        });
+    }
+
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let grace = Duration::from_secs(5);
+                return Some(Output {
+                    status,
+                    stdout: rx_out.recv_timeout(grace).unwrap_or_default(),
+                    stderr: rx_err.recv_timeout(grace).unwrap_or_default(),
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Asks yt-dlp what's in a post without downloading any of it.
+fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
+    crate::download::pace();
+
+    let mut cmd = base_command(yt);
+    cmd.args([
+        "--dump-json",
+        // Instagram photo posts have no video formats at all, and without
+        // this yt-dlp treats that as fatal and prints nothing usable.
+        "--ignore-no-formats-error",
+        "--no-warnings",
+        "--socket-timeout",
+        "20",
+    ])
+    .arg(url);
+
+    let Some(output) = run_capped(&mut cmd, PLAN_TIMEOUT) else {
+        return Plan {
+            items: Vec::new(),
+            trouble: Some("That post took too long to read. Try again in a moment.".into()),
+        };
     };
 
     let text = String::from_utf8_lossy(&output.stdout);
@@ -164,14 +234,26 @@ fn plan_from_yt_dlp(yt: &Path, url: &str) -> Vec<Planned> {
         }
     }
 
-    planned
+    // Only consulted if nothing was found. A post can hit a rate limit on one
+    // of its items and still hand over the rest, and that isn't worth a warning.
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    let trouble = if stderr.contains("429") || stderr.contains("too many requests") {
+        Some("That site is asking us to slow down. Wait a minute and try again.".into())
+    } else {
+        None
+    };
+
+    Plan {
+        items: planned,
+        trouble,
+    }
 }
 
 /// Pulls image addresses out of yt-dlp's complaints about a Reddit post.
 ///
 /// They arrive wrapped in a `reddit.com/media?url=` redirect with the real
 /// address percent-encoded inside it.
-fn reddit_images(stderr: &str) -> Vec<String> {
+pub(crate) fn reddit_images(stderr: &str) -> Vec<String> {
     let mut found = Vec::new();
 
     for part in stderr.split("media?url=").skip(1) {
@@ -226,6 +308,63 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .user_agent("nitrate")
         .build()
         .map_err(|e| format!("Couldn't start the download: {e}"))
+}
+
+/// `reddit.com/r/<sub>/s/<id>` — the shape the Share button produces.
+fn is_reddit_share_link(url: &str) -> bool {
+    if !url.contains("reddit.com/") {
+        return false;
+    }
+
+    let path = url.split('?').next().unwrap_or(url).trim_end_matches('/');
+    let mut segments = path.rsplit('/');
+    // The id, then the marker before it.
+    segments.next().is_some_and(|id| !id.is_empty()) && segments.next() == Some("s")
+}
+
+/// Turns a Reddit share link into the post it points at.
+///
+/// The Share button hands out `reddit.com/r/sub/s/<id>`, and that is what most
+/// people paste. yt-dlp doesn't resolve it — it sat on the link until the
+/// timeout fired, so a shared post simply never worked. Reddit answers a plain
+/// request with a 301 naming the real address, so one request settles it.
+///
+/// Anything unexpected returns the link untouched: this is a shortcut, not a
+/// gate, and the pipeline behind it is entitled to its own opinion.
+pub fn canonical_url(url: &str) -> String {
+    if !is_reddit_share_link(url) {
+        return url.to_string();
+    }
+
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("nitrate")
+        .build()
+    else {
+        return url.to_string();
+    };
+
+    let Ok(response) = client.get(url).send() else {
+        return url.to_string();
+    };
+
+    let Some(location) = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return url.to_string();
+    };
+
+    // Drop the share tracking that comes with it, and refuse to be redirected
+    // anywhere but Reddit.
+    let target = location.split('?').next().unwrap_or(location);
+    if target.starts_with("https://www.reddit.com/") {
+        target.to_string()
+    } else {
+        url.to_string()
+    }
 }
 
 /// Downloads a still straight from the CDN. No tool involved — it's a plain
@@ -319,7 +458,13 @@ pub fn fetch_post(
     std::fs::create_dir_all(work_dir)
         .map_err(|e| format!("Couldn't create a working folder: {e}"))?;
 
-    let planned = plan_from_yt_dlp(yt, url);
+    // Also resolved here, not only at the probe: a link can reach this without
+    // having been probed, and the tools below can't follow a share link either.
+    let resolved = canonical_url(url);
+    let url = resolved.as_str();
+
+    let plan = plan_from_yt_dlp(yt, url);
+    let planned = &plan.items;
     let total = planned.len().max(1) as f64;
     let mut items: Vec<MediaItem> = Vec::new();
 
@@ -359,7 +504,14 @@ pub fn fetch_post(
     // Nothing yt-dlp could see. On X that means a photo tweet, which it reports
     // no thumbnails for at all — the one case that genuinely needs the other
     // tool.
+    //
+    // A post that was rate-limited is a different matter: nothing is wrong with
+    // it, so the second tool would only spend another minute being turned away
+    // and then report the wrong reason. Say what actually happened instead.
     if items.is_empty() {
+        if let Some(reason) = plan.trouble {
+            return Err(reason);
+        }
         if let Some(gallery) = gallery {
             items = fetch_with_gallery(gallery, work_dir, url, cancel)?;
         }
@@ -589,6 +741,33 @@ mod tests {
 #[cfg(test)]
 mod reddit_tests {
     use super::*;
+
+    #[test]
+    fn spots_a_share_link_in_the_shapes_it_arrives_in() {
+        for url in [
+            "https://www.reddit.com/r/interesting/s/4sEQlGicku",
+            "https://www.reddit.com/r/interesting/s/4sEQlGicku/",
+            "https://www.reddit.com/r/interesting/s/4sEQlGicku?utm_source=share",
+            "https://reddit.com/r/pics/s/AbCdEf",
+        ] {
+            assert!(is_reddit_share_link(url), "{url} is a share link");
+        }
+    }
+
+    #[test]
+    fn leaves_every_other_reddit_address_alone() {
+        for url in [
+            "https://www.reddit.com/r/interesting/comments/1vjv949/i_have_this/",
+            "https://www.reddit.com/r/interesting/comments/1vjv949/i_have_this",
+            // A subreddit that happens to be called "s" is still not a share
+            // link — the marker sits one segment from the end, not at it.
+            "https://www.reddit.com/r/s/",
+            "https://i.redd.it/dkrhd8sdw3ih1.jpeg",
+            "https://x.com/i/status/2085248162445373578",
+        ] {
+            assert!(!is_reddit_share_link(url), "{url} is not a share link");
+        }
+    }
 
     #[test]
     fn finds_the_image_reddit_hid_in_a_complaint() {

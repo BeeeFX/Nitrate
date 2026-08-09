@@ -11,8 +11,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -310,8 +310,36 @@ struct DumpJson {
     is_live: bool,
 }
 
+/// Spaces out metadata requests so we don't rate-limit ourselves.
+///
+/// Pasting five links fired five yt-dlp processes at the same instant, and
+/// Reddit answered the later ones with 429 — a limit we inflicted on ourselves,
+/// which then surfaced as "couldn't download the images" on posts that were
+/// perfectly fine. They now go out one at a time, spaced.
+pub(crate) fn pace() {
+    static GATE: Mutex<Option<Instant>> = Mutex::new(None);
+    const GAP: Duration = Duration::from_millis(800);
+
+    // Held across the sleep on purpose: that is what serialises them.
+    let mut last = GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(previous) = *last {
+        let since = previous.elapsed();
+        if since < GAP {
+            std::thread::sleep(GAP - since);
+        }
+    }
+    *last = Some(Instant::now());
+}
+
 /// Reads a link's metadata without downloading it.
 pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
+    // A share link is resolved before anything else looks at it, so everything
+    // downstream — including the address stored with the job — is the real post.
+    let resolved = crate::media::canonical_url(url);
+    let url = resolved.as_str();
+
+    pace();
+
     let mut child = base_command(bin)
         .args([
             "--no-warnings",
@@ -383,13 +411,29 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
         .map_err(|e| format!("The downloader didn't exit cleanly: {e}"))?;
     let usable = stdout.trim_start().starts_with('{');
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // A Reddit photo post fails here by design, and the failure is the answer.
+    //
+    // yt-dlp resolves the post, finds the image, and then refuses to fetch a
+    // still — naming the address in the refusal, which is exactly how the media
+    // pipeline gets it. Reading that as "Unsupported URL" turned every Reddit
+    // photo post away at the door with "That site isn't supported.", so the
+    // pipeline that handles them was never reached by anyone.
+    if !usable && !crate::media::reddit_images(&stderr).is_empty() {
+        return Ok(UrlInfo {
+            title: site_name(url).to_string(),
+            duration: None,
+            site: site_name(url).to_string(),
+            webpage_url: url.to_string(),
+        });
+    }
+
     // Only a failure if there's nothing to read. yt-dlp still reports a
     // non-zero exit for a photo post while printing perfectly good metadata,
     // so the JSON is what decides, not the exit code.
     if !output.status.success() && !usable {
-        return Err(summarise_yt_dlp_error(&String::from_utf8_lossy(
-            &output.stderr,
-        )));
+        return Err(summarise_yt_dlp_error(&stderr));
     }
 
     // Some extractors say nothing at all about a photo post. It's still a link
