@@ -450,17 +450,16 @@ fn fetch_with_gallery(
             return Err("That post needs an account to view.".into());
         }
 
-        // Anything else keeps its own words. A single catch-all message told
-        // nobody anything, this one included.
-        let detail = err
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("no reason given")
-            .trim();
-        return Err(format!(
-            "Couldn't download the images from that post: {detail}"
-        ));
+        // Anything else keeps its own words, if it has any worth repeating.
+        //
+        // It usually doesn't. When Reddit answers with its web page instead of
+        // data, the "error" *is* that page, and an earlier version of this put
+        // the entire stylesheet on the card. Tool output is not a user-facing
+        // message and has to earn its place.
+        return Err(match readable_reason(&err) {
+            Some(reason) => format!("Couldn't download the images from that post: {reason}"),
+            None => "Couldn't download the images from that post.".into(),
+        });
     }
 
     // gallery-dl builds its own folders under the destination, so collect
@@ -485,6 +484,33 @@ fn fetch_with_gallery(
             MediaItem { path, kind }
         })
         .collect())
+}
+
+/// A line from a tool's output fit to show someone, or nothing.
+///
+/// Anything carrying markup, style rules or a stack frame is discarded rather
+/// than trimmed: a shorter piece of a stylesheet is still a stylesheet.
+fn readable_reason(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && line.len() <= 160
+                && !line.contains('{')
+                && !line.contains('}')
+                && !line.contains("--")
+                && !line.contains("File \"")
+                && !line.starts_with('<')
+        })
+        // The last such line is the conclusion; earlier ones tend to be the
+        // retries on the way there.
+        .next_back()
+        .map(|line| {
+            line.trim_start_matches("ERROR: ")
+                .trim_start_matches("error: ")
+                .to_string()
+        })
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -584,6 +610,44 @@ mod reddit_tests {
         assert!(
             reddit_images(stderr).is_empty(),
             "only i.redd.it and preview.redd.it should be followed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_to_put_a_stylesheet_on_a_card() {
+        // Shortened, but the same shape as what Reddit actually returned: its
+        // web page, arriving where data was expected, and ending up verbatim on
+        // the card as an "error".
+        let stderr = ".theme-light,:root{--rem360:22.5rem;--rem320:20rem;\
+                      --spacer-4xs:0.125rem;--size-2xs:0.25rem}";
+
+        assert_eq!(
+            readable_reason(stderr),
+            None,
+            "a stylesheet is not a reason anyone can act on"
+        );
+    }
+
+    #[test]
+    fn keeps_a_real_message() {
+        let stderr = "[reddit][error] HTTP redirect to login page";
+        assert_eq!(
+            readable_reason(stderr).as_deref(),
+            Some("[reddit][error] HTTP redirect to login page")
+        );
+    }
+
+    #[test]
+    fn drops_a_python_traceback() {
+        let stderr = "Traceback (most recent call last):\n  File \"gallery_dl/job.py\", line 1\n";
+        assert_eq!(
+            readable_reason(stderr).as_deref(),
+            Some("Traceback (most recent call last):")
         );
     }
 }

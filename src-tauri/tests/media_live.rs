@@ -221,7 +221,11 @@ fn an_x_photo_post_comes_back_through_gallery_dl() {
 
     for item in &items {
         let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
-        println!("  {:?}  {:?}  {size} bytes", item.kind, item.path.file_name().unwrap());
+        println!(
+            "  {:?}  {:?}  {size} bytes",
+            item.kind,
+            item.path.file_name().unwrap()
+        );
     }
 
     assert!(!items.is_empty(), "nothing came back from the tweet");
