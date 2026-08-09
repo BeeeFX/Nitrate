@@ -494,7 +494,9 @@ fn readable_reason(stderr: &str) -> Option<String> {
     stderr
         .lines()
         .map(str::trim)
-        .filter(|line| {
+        // The last such line is the conclusion; earlier ones tend to be the
+        // retries on the way there.
+        .rfind(|line| {
             !line.is_empty()
                 && line.len() <= 160
                 && !line.contains('{')
@@ -503,9 +505,6 @@ fn readable_reason(stderr: &str) -> Option<String> {
                 && !line.contains("File \"")
                 && !line.starts_with('<')
         })
-        // The last such line is the conclusion; earlier ones tend to be the
-        // retries on the way there.
-        .next_back()
         .map(|line| {
             line.trim_start_matches("ERROR: ")
                 .trim_start_matches("error: ")
