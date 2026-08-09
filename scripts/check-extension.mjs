@@ -203,7 +203,12 @@ function reelFixture(body) {
     const rail = makeElement("div");
     rail.rect = { width: 60, height: 600, top: index * 900 + 150, left: 1150 };
     for (const label of ["Like", "Comment", "Share", "Save"]) {
-      rail.appendChild(makeElement("svg", { "aria-label": label }));
+      // Wrapped, as Instagram"s own are: the structural search only counts an
+      // icon that belongs to something clickable, so a bare svg here would
+      // model a decoration rather than a control.
+      const control = makeElement("div", { role: "button" });
+      control.appendChild(makeElement("svg", { "aria-label": label }));
+      rail.appendChild(control);
     }
     reel.appendChild(rail);
     main.appendChild(reel);

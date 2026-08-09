@@ -305,7 +305,14 @@ function findActionClusters(root) {
     // comments rather than the post. That's how the button ended up down in the
     // replies on Instagram.
     const box = icon.getBoundingClientRect?.();
-    return !box || box.width === 0 || box.width >= 18;
+    if (box && box.width > 0 && box.width < 18) return false;
+
+    // And it has to be part of something clickable. Instagram's "More posts"
+    // grid puts a play badge on each thumbnail, and three of those in a row
+    // form a box that looks exactly like an action row to this search — which
+    // is how buttons ended up floating beside the suggestions grid. A badge is
+    // decoration painted over a link; a real control is a button.
+    return Boolean(icon.closest?.('button, [role="button"]'));
   });
   if (icons.length < 3) return [];
 
