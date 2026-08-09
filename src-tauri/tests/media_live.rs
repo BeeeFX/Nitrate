@@ -140,3 +140,51 @@ fn a_photo_post_gets_past_the_probe() {
         println!("ok  {url} -> {:?}", info.title);
     }
 }
+
+#[test]
+#[ignore = "needs the network"]
+fn a_reddit_photo_post_comes_back_as_an_image() {
+    let dir = std::env::temp_dir().join("nitrate-live-reddit");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let bins = ffmpeg::resolve();
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    // Reddit's data API is closed to us, so this works only because yt-dlp
+    // names the image address in the refusal it prints. No gallery-dl here.
+    let items = media::fetch_post(
+        &yt_dlp(),
+        None,
+        &bins,
+        "https://www.reddit.com/r/dijondijon/comments/1vipx0d/jane_remover_samples_talk_down/",
+        &dir,
+        1080,
+        &cancel,
+        |_| {},
+    )
+    .expect("fetching should not error")
+    .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    for item in &items {
+        let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+        println!(
+            "  {:?}  {:?}  {size} bytes",
+            item.kind,
+            item.path.file_name().unwrap()
+        );
+    }
+
+    assert!(!items.is_empty(), "nothing came back from the post");
+    assert!(
+        items.iter().any(|i| i.kind == media::MediaKind::Photo),
+        "expected a photo"
+    );
+    assert!(
+        items
+            .iter()
+            .all(|i| std::fs::metadata(&i.path).unwrap().len() > 10_000),
+        "a real image, not an error page saved to disk"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

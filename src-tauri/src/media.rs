@@ -11,18 +11,19 @@
 //! |-----------|-------------------------|--------------------------|
 //! | Instagram | yt-dlp, no login needed | as video                 |
 //! | X         | gallery-dl              | yt-dlp, `tweet_video`    |
-//! | Reddit    | blocked, see below      | as video                 |
+//! | Reddit    | yt-dlp, via its refusal | as video                 |
 //!
 //! Instagram serves a photo post's images through the field yt-dlp reports as
 //! "thumbnails", and the largest is the genuine original — 1080x1350 on the
 //! post this was tested against, not a preview. X hands back nothing at all for
 //! a photo tweet, which is what gallery-dl is here for.
 //!
-//! Reddit images cannot be fetched at all without signing in. It answers a
-//! non-browser request with its web page instead of data, so gallery-dl tries
-//! to parse HTML as JSON and dies on the first character — and its own public
-//! .json endpoint does the same. Reddit videos still work, because those go
-//! through yt-dlp by a different route.
+//! Reddit takes the strangest route of the three. Its data API is closed to us —
+//! gallery-dl gets the web page where it expects JSON, and the public .json
+//! endpoint refuses too — but yt-dlp still resolves a post and then declines to
+//! download the still it found, naming the address in the refusal. That address
+//! is on i.redd.it, which serves it over ordinary HTTP. The block is on reading
+//! Reddit's API, not on reaching its images.
 
 use crate::ffmpeg::{Binaries, Cancelled};
 use serde::{Deserialize, Serialize};
@@ -135,6 +136,17 @@ fn plan_from_yt_dlp(yt: &Path, url: &str) -> Vec<Planned> {
     let text = String::from_utf8_lossy(&output.stdout);
     let mut planned = Vec::new();
 
+    // Reddit says what it holds while refusing to hand it over.
+    //
+    // yt-dlp resolves the post, finds the image, and then gives up with
+    // "Unsupported URL: https://www.reddit.com/media?url=https%3A%2F%2F..."
+    // because downloading a still isn't its job. The address of the image is
+    // right there in the complaint, and i.redd.it serves it over plain HTTP —
+    // so the refusal is only about who downloads it, not about access.
+    for url in reddit_images(&String::from_utf8_lossy(&output.stderr)) {
+        planned.push(Planned::Photo(url));
+    }
+
     for (index, line) in text.lines().filter(|l| l.starts_with('{')).enumerate() {
         let Ok(entry) = serde_json::from_str::<Entry>(line) else {
             continue;
@@ -153,6 +165,55 @@ fn plan_from_yt_dlp(yt: &Path, url: &str) -> Vec<Planned> {
     }
 
     planned
+}
+
+/// Pulls image addresses out of yt-dlp's complaints about a Reddit post.
+///
+/// They arrive wrapped in a `reddit.com/media?url=` redirect with the real
+/// address percent-encoded inside it.
+fn reddit_images(stderr: &str) -> Vec<String> {
+    let mut found = Vec::new();
+
+    for part in stderr.split("media?url=").skip(1) {
+        let encoded = part
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(['"', '\'', ')', '.']);
+        let url = percent_decode(encoded);
+
+        // Only Reddit's own image hosts, so a stray link in an error message
+        // can't turn into something we go and fetch.
+        let host_ok =
+            url.starts_with("https://i.redd.it/") || url.starts_with("https://preview.redd.it/");
+
+        if host_ok && !found.contains(&url) {
+            found.push(url);
+        }
+    }
+
+    found
+}
+
+/// Enough percent-decoding for a URL inside a query string.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -375,18 +436,12 @@ fn fetch_with_gallery(
         let err = String::from_utf8_lossy(&output.stderr);
         let lower = err.to_lowercase();
 
-        // Reddit answers a non-browser request with its web page rather than
-        // data, so the extractor tries to parse HTML as JSON and dies on the
-        // first character. Nothing here can fix that — it's Reddit declining to
-        // be read programmatically, and the same wall its own public .json
-        // endpoint now puts up. Worth saying plainly rather than reporting a
-        // generic failure the user could waste time retrying.
+        // gallery-dl can't read Reddit — it gets the web page where it expects
+        // JSON and dies parsing it. That isn't fatal any more: yt-dlp names the
+        // image address while refusing to fetch it, so this path is only ever
+        // reached for a post nothing else could see either.
         if lower.contains("jsondecodeerror") || lower.contains("expecting value") {
-            return Err(
-                "Reddit is refusing automated access at the moment, so its images \
-                 can't be fetched. Videos still work."
-                    .into(),
-            );
+            return Err("Couldn't read what that post contains.".into());
         }
         if lower.contains("429") || lower.contains("too many requests") {
             return Err("That site is asking us to slow down. Wait a minute and try again.".into());
@@ -503,5 +558,32 @@ mod tests {
         // Not an extension we'd trust to be an image.
         assert_eq!(extension_from_url("https://x/y/a.php"), None);
         assert_eq!(extension_from_url("https://x/y/noextension"), None);
+    }
+}
+
+#[cfg(test)]
+mod reddit_tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_image_reddit_hid_in_a_complaint() {
+        // The real message, from a post that failed before this existed.
+        let stderr = "ERROR: Unsupported URL: \
+                      https://www.reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fdkrhd8sdw3ih1.jpeg";
+
+        assert_eq!(
+            reddit_images(stderr),
+            vec!["https://i.redd.it/dkrhd8sdw3ih1.jpeg".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignores_anything_that_is_not_reddits_own_image_host() {
+        let stderr = "ERROR: Unsupported URL: \
+                      https://www.reddit.com/media?url=https%3A%2F%2Fevil.example%2Fx.jpg";
+        assert!(
+            reddit_images(stderr).is_empty(),
+            "only i.redd.it and preview.redd.it should be followed"
+        );
     }
 }
