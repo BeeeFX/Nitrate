@@ -1,6 +1,6 @@
 {
   "name": "nitrate",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "Drag, drop, done. Compress any video to fit Discord's upload limits.",
   "type": "module",
   "private": true,
