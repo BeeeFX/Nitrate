@@ -911,7 +911,12 @@ const STYLE_TEXT = `
     .nitrate-send[data-site="x"] {
       height: auto;
       align-self: center;
-      padding: 4px;
+      /* Horizontal only. The row is 20px tall by nature and stretches every
+         child to match its tallest, so 4px top and bottom around an 18px mark
+         made it 26 and took the whole row — and every tweet below it — with
+         it. Measured: group 20px without this button, 26px with it. The
+         siblings all reporting 26px was the stretch, not the baseline. */
+      padding: 0 4px;
       background: none;
       margin: 0;
     }
