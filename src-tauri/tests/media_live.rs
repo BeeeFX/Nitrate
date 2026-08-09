@@ -249,6 +249,49 @@ fn a_reddit_gallery_gives_up_every_image() {
 
 #[test]
 #[ignore = "needs the network"]
+fn a_reddit_gif_stays_a_gif() {
+    let dir = std::env::temp_dir().join("nitrate-live-redditgif");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let bins = ffmpeg::resolve();
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    // The page names this file on both of Reddit's image hosts, so it also
+    // covers the two collapsing into one item rather than arriving twice.
+    let items = media::fetch_post(
+        &yt_dlp(),
+        None,
+        &bins,
+        "https://www.reddit.com/r/gifs/comments/1luldoo/showing_off_some_tricks/",
+        &dir,
+        1080,
+        &cancel,
+        |_| {},
+    )
+    .expect("fetching should not error")
+    .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    for item in &items {
+        let size = std::fs::metadata(&item.path).map(|m| m.len()).unwrap_or(0);
+        println!("  {:?}  {:?}  {size} bytes", item.kind, item.path.file_name().unwrap());
+    }
+
+    assert_eq!(items.len(), 1, "one GIF, named twice on the page");
+    assert_eq!(
+        items[0].kind,
+        media::MediaKind::Gif,
+        "a GIF came back labelled something else"
+    );
+
+    // The label is not the point on its own — the file has to be one too.
+    let head = std::fs::read(&items[0].path).expect("readable");
+    assert_eq!(&head[0..3], b"GIF", "not actually a GIF file");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "needs the network"]
 fn a_reddit_photo_post_comes_back_as_an_image() {
     let dir = std::env::temp_dir().join("nitrate-live-reddit");
     let _ = std::fs::remove_dir_all(&dir);
