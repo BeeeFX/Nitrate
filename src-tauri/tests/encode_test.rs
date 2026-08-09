@@ -237,6 +237,7 @@ fn trimming_shortens_the_output() {
         start: Some(3.0),
         end: Some(8.0),
         crop: None,
+        force_encode: false,
     };
     let (bytes, _, duration) = encode_with_edits(10_000_000, "trim", edits);
 
@@ -260,6 +261,7 @@ fn trimming_buys_quality_at_the_same_target() {
             start: Some(0.0),
             end: Some(2.0),
             crop: None,
+            force_encode: false,
         },
     );
 
@@ -289,6 +291,7 @@ fn cropping_changes_the_output_shape() {
             width: 0.5625,
             height: 1.0,
         }),
+            force_encode: false,
     };
     let (bytes, plan, _) = encode_with_edits(10_000_000, "crop", edits);
 
@@ -468,6 +471,7 @@ fn a_file_that_already_fits_is_left_alone() {
         start: Some(1.0),
         end: None,
         crop: None,
+        force_encode: false,
     };
     assert!(
         !encode::can_pass_through(&info, &set, &trimmed, &input),
@@ -519,6 +523,7 @@ fn keep_mode_trims_without_re_encoding() {
         start: Some(0.0),
         end: Some(4.0),
         crop: None,
+        force_encode: false,
     };
 
     let plan = encode::plan(&info, &set, &edits, &bins).expect("plan should succeed");
@@ -601,6 +606,7 @@ fn keep_mode_re_encodes_when_it_has_to() {
             width: 0.5,
             height: 0.5,
         }),
+            force_encode: false,
     };
 
     let plan = encode::plan(&info, &set, &edits, &bins).expect("plan should succeed");
@@ -677,6 +683,7 @@ fn cropping_a_photo_writes_a_photo() {
             width: 0.5,
             height: 0.5,
         }),
+            force_encode: false,
     };
 
     let cancel = Arc::new(AtomicBool::new(false));
@@ -708,6 +715,234 @@ fn cropping_a_photo_writes_a_photo() {
         (out.height as i32 - 675).abs() <= 2,
         "height was {}",
         out.height
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// GIFs
+// ---------------------------------------------------------------------------
+
+/// A real animated GIF, built here so the suite needs no fixture and no network.
+fn make_gif(dir: &Path, name: &str, size: &str, fps: u32, secs: u32) -> PathBuf {
+    let bins = ffmpeg::resolve();
+    let out = dir.join(name);
+
+    let status = Command::new(&bins.ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={size}:rate={fps}:duration={secs}"),
+        ])
+        .args(["-loop", "0"])
+        .arg(&out)
+        .status()
+        .expect("ffmpeg should run");
+
+    assert!(status.success(), "building the test GIF failed");
+    out
+}
+
+fn is_gif_file(path: &Path) -> bool {
+    std::fs::read(path).map(|b| b.starts_with(b"GIF")).unwrap_or(false)
+}
+
+#[test]
+fn a_gif_is_handed_over_untouched_by_default() {
+    let dir = temp_dir("gif-default");
+    // Comfortably over the target below, so size is not what lets it through.
+    let input = make_gif(&dir, "in.gif", "320x240", 15, 3);
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+
+    let tiny = settings(50_000, &dir);
+    assert!(
+        std::fs::metadata(&input).unwrap().len() > 50_000,
+        "the test GIF needs to exceed the target for this to mean anything"
+    );
+
+    assert!(
+        encode::can_pass_through(&info, &tiny, &Edits::default(), &input),
+        "a GIF should be left alone rather than squeezed into a size limit"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_edited_gif_comes_back_a_gif() {
+    let dir = temp_dir("gif-edited");
+    let input = make_gif(&dir, "in.gif", "320x240", 15, 4);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    // Opening the editor is the deliberate act that unlocks this, so an edit
+    // is what the test applies: trimmed to the middle, and cropped.
+    let edits = Edits {
+        start: Some(1.0),
+        end: Some(3.0),
+        crop: Some(CropRect {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+        }),
+            force_encode: false,
+    };
+
+    let set = settings(2_000_000, &dir);
+    assert!(
+        !encode::can_pass_through(&info, &set, &edits, &input),
+        "an edited GIF has to be re-encoded, not copied"
+    );
+
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("encode should not error")
+        .unwrap_or_else(|_| panic!("encode should not be cancelled"));
+
+    assert_eq!(
+        outcome.output.extension().and_then(|e| e.to_str()),
+        Some("gif"),
+        "a trimmed GIF came back as something else"
+    );
+    assert!(
+        is_gif_file(&outcome.output),
+        "the file is named .gif but isn't one"
+    );
+
+    // The edits actually landed, rather than the file merely surviving.
+    let edited = ffmpeg::probe(&bins, &outcome.output).expect("probe the result");
+    assert!(
+        (edited.duration - 2.0).abs() < 0.6,
+        "trim didn't apply: {}s",
+        edited.duration
+    );
+    assert!(
+        edited.width < info.width,
+        "crop didn't apply: still {}px wide",
+        edited.width
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_edited_gif_still_gets_under_a_size_limit() {
+    let dir = temp_dir("gif-target");
+    let input = make_gif(&dir, "in.gif", "480x360", 20, 4);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    let original = std::fs::metadata(&input).unwrap().len();
+    let target = original / 4;
+
+    // Only a crop, so the shrinking has to come from the retry loop rather than
+    // from trimming most of the frames away.
+    let edits = Edits {
+        start: None,
+        end: None,
+        crop: Some(CropRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.9,
+            height: 0.9,
+        }),
+            force_encode: false,
+    };
+
+    let set = settings(target, &dir);
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("encode should not error")
+        .unwrap_or_else(|_| panic!("encode should not be cancelled"));
+
+    println!(
+        "{original} -> {} bytes (target {target}, {} attempts)",
+        outcome.final_bytes, outcome.attempts
+    );
+
+    assert!(is_gif_file(&outcome.output), "still has to be a GIF");
+    assert!(
+        outcome.final_bytes <= target,
+        "landed at {} against a target of {target}",
+        outcome.final_bytes
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_editor_can_shrink_a_gif_without_cropping_it() {
+    let dir = temp_dir("gif-forced");
+    let input = make_gif(&dir, "in.gif", "480x360", 20, 3);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    let original = std::fs::metadata(&input).unwrap().len();
+    let set = settings(original / 3, &dir);
+
+    // No crop, no trim — just "make this smaller", which is a reasonable thing
+    // to want and has no other way to be asked for. Without the flag the file
+    // is copied and reports itself done having changed nothing.
+    let asked = Edits {
+        start: None,
+        end: None,
+        crop: None,
+        force_encode: true,
+    };
+    let untouched = Edits::default();
+
+    assert!(
+        encode::can_pass_through(&info, &set, &untouched, &input),
+        "left alone, a GIF is handed over as it is"
+    );
+    assert!(
+        !encode::can_pass_through(&info, &set, &asked, &input),
+        "asked for directly, it gets re-encoded"
+    );
+
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &asked,
+        name_hint: None,
+    };
+
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("encode should not error")
+        .unwrap_or_else(|_| panic!("encode should not be cancelled"));
+
+    println!("{original} -> {} bytes", outcome.final_bytes);
+    assert!(is_gif_file(&outcome.output), "still a GIF");
+    assert!(
+        outcome.final_bytes < original,
+        "asked to shrink and didn't: {} vs {original}",
+        outcome.final_bytes
     );
 
     let _ = std::fs::remove_dir_all(&dir);

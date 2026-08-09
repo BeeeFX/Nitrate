@@ -218,6 +218,15 @@ pub struct Edits {
     pub start: Option<f64>,
     pub end: Option<f64>,
     pub crop: Option<CropRect>,
+    /// The editor's compress button was pressed on this one.
+    ///
+    /// Not a picture edit, so it stays out of `is_empty` — it changes nothing
+    /// about the ffmpeg command, only whether the file is allowed to skip it.
+    /// A GIF is otherwise handed over untouched, and this is how someone says
+    /// they meant it: shrinking one without cropping or trimming it is a
+    /// perfectly reasonable thing to want, and there's no other way to ask.
+    #[serde(default)]
+    pub force_encode: bool,
 }
 
 impl Edits {
@@ -338,6 +347,12 @@ const LADDER: &[u32] = &[2160, 1440, 1080, 900, 720, 540, 480, 360, 270, 180];
 
 /// Below this, video stops being worth encoding at all.
 const MIN_VIDEO_KBPS: f64 = 48.0;
+
+/// Floors for shrinking a GIF towards a size target. Past these it stops being
+/// worth having — a postage stamp at four frames a second is not the thing
+/// anyone asked to keep as a GIF.
+const MIN_GIF_HEIGHT: u32 = 120;
+const MIN_GIF_FPS: f64 = 8.0;
 
 pub fn plan(
     info: &MediaInfo,
@@ -851,6 +866,37 @@ fn build_args(
     if (plan.fps - info.fps).abs() > 0.01 {
         filters.push(format!("fps={:.3}", plan.fps));
     }
+
+    // A GIF that reaches here was edited, and it comes back a GIF.
+    //
+    // None of the video machinery below applies: there's no codec to pick, no
+    // bitrate to spend and no audio. Size is bought with pixels and frames
+    // instead, which is what the retry loop adjusts when one lands over target.
+    if is_gif(input) {
+        let chain = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("{},", filters.join(","))
+        };
+        args.extend([
+            s("-filter_complex"),
+            // Same two-pass palette as the converter: one pass works out the
+            // best colours for this clip, the second maps every frame onto
+            // them. Letting the encoder pick a fixed palette is what makes
+            // most GIFs look like they escaped from 1998.
+            format!(
+                "{chain}split[a][b];\
+                 [a]palettegen=max_colors=128:stats_mode=diff[p];\
+                 [b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+            ),
+            s("-an"),
+            s("-loop"),
+            s("0"),
+        ]);
+        args.push(output.to_string_lossy().into_owned());
+        return args;
+    }
+
     if !filters.is_empty() {
         args.push(s("-vf"));
         args.push(filters.join(","));
@@ -1081,7 +1127,10 @@ pub fn run_job(
         && !plan.copy_streams
         && settings.two_pass
         && settings.video_codec.supports_two_pass()
-        && plan.encoder.starts_with("lib");
+        && plan.encoder.starts_with("lib")
+        // A GIF isn't encoded by any of that, and an analysis pass over one
+        // writes a log for an encoder that never runs.
+        && !is_gif(task.input);
 
     let mut attempts = 0;
     let mut final_bytes;
@@ -1145,10 +1194,26 @@ pub fn run_job(
         }
 
         let correction = (settings.target_bytes as f64 / final_bytes as f64) * 0.97;
-        let corrected = (plan.video_kbps as f64 * correction).max(MIN_VIDEO_KBPS);
-        plan.video_kbps = corrected.round() as u32;
-        plan.notes
-            .push(format!("Overshot; retrying at {} kbps.", plan.video_kbps));
+
+        // A GIF has no bitrate to turn down. What it costs is pixels and
+        // frames, so that's what gets reduced — by the square root of the
+        // correction, since the frame is two-dimensional and halving each side
+        // quarters the area.
+        if is_gif(task.input) {
+            let shrink = correction.sqrt().clamp(0.35, 0.95);
+            let reduced = ((plan.height as f64 * shrink) as u32).max(MIN_GIF_HEIGHT);
+            plan.height = reduced & !1;
+            plan.fps = (plan.fps * shrink).max(MIN_GIF_FPS);
+            plan.notes.push(format!(
+                "Overshot; retrying at {}p and {:.0} fps.",
+                plan.height, plan.fps
+            ));
+        } else {
+            let corrected = (plan.video_kbps as f64 * correction).max(MIN_VIDEO_KBPS);
+            plan.video_kbps = corrected.round() as u32;
+            plan.notes
+                .push(format!("Overshot; retrying at {} kbps.", plan.video_kbps));
+        }
         on_progress(0.0, "Retrying");
     }
 
@@ -1193,17 +1258,35 @@ pub fn still_extension(input: &Path) -> Option<&'static str> {
     }
 }
 
+/// A GIF, which is kept as one rather than turned into video.
+pub fn is_gif(input: &Path) -> bool {
+    input
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+}
+
 pub fn can_pass_through(
     info: &MediaInfo,
     settings: &Settings,
     edits: &Edits,
     input: &Path,
 ) -> bool {
-    // Quality mode is an explicit "re-encode this", so there's nothing to skip.
-    if settings.mode == TargetMode::Quality {
+    if !edits.is_empty() || edits.force_encode {
         return false;
     }
-    if !edits.is_empty() {
+
+    // A GIF is handed over untouched, whatever size it is and whatever target
+    // is set. Squeezing one into a size limit means 256 colours and a visible
+    // mess, and the answer that actually works — make it video — isn't what
+    // was asked for by dropping in a GIF. Opening the editor is the deliberate
+    // act that unlocks re-encoding one, and it still comes back a GIF.
+    if is_gif(input) {
+        return true;
+    }
+
+    // Quality mode is an explicit "re-encode this", so there's nothing to skip.
+    if settings.mode == TargetMode::Quality {
         return false;
     }
     // Keep mode with no edits asks for nothing at all to happen, whatever the
@@ -1335,8 +1418,11 @@ fn output_path(
     };
     // A still keeps the format it arrived in. Writing a cropped photo into an
     // MP4 container would be nonsense, and the container setting is about
-    // video — it has nothing to say about a JPEG.
-    let ext = still_extension(input).unwrap_or_else(|| settings.container.extension());
+    // video — it has nothing to say about a JPEG. A GIF is the same promise:
+    // trimming one gives back a GIF, not the video it would compress better as.
+    let ext = still_extension(input)
+        .or_else(|| is_gif(input).then_some("gif"))
+        .unwrap_or_else(|| settings.container.extension());
 
     let mut candidate = dir.join(format!("{stem}-nitrate.{ext}"));
     let mut n = 2;

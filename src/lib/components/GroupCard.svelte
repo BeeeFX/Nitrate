@@ -24,12 +24,16 @@
   const failed = $derived(items.filter((j) => j.status === "failed").length);
 
   /**
-   * A post of nothing but photos has nothing to compress.
+   * A post of nothing but photos and GIFs has nothing to compress.
    *
-   * They are handed over as they arrive, so a Compress button would promise
+   * Both are handed over as they arrive, so a Compress button would promise
    * work that never happens and then report "done" for having done nothing.
+   * A GIF can still be re-encoded — but only from the editor, one at a time,
+   * which is a deliberate act and not something a bulk button should do.
    */
-  const anythingToCompress = $derived(items.some((j) => j.mediaKind !== "photo"));
+  const anythingToCompress = $derived(
+    items.some((j) => j.mediaKind === "video" || j.mediaKind == null),
+  );
 
   /** Only meaningful once everything has finished; partial totals mislead. */
   const totalBytes = $derived(

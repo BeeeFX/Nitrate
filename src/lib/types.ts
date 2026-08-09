@@ -71,6 +71,15 @@ export interface Edits {
   start: number | null;
   end: number | null;
   crop: CropRect | null;
+  /**
+   * Set when the editor's compress button was pressed.
+   *
+   * A GIF is left alone everywhere else, so this is how someone says they
+   * meant it — shrinking one without cropping or trimming is a reasonable
+   * thing to want. Deliberately not part of `hasEdits`: it isn't an edit, and
+   * counting it would light up the "unsaved changes" state for nothing.
+   */
+  forceEncode?: boolean;
 }
 
 export interface UrlInfo {

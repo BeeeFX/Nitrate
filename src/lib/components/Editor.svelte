@@ -78,6 +78,8 @@
   );
   /** A photo out of a post: croppable, but there's nothing to trim or play. */
   const isStill = $derived(job.mediaKind === "photo");
+  /** Croppable and trimmable like a video, but it comes back out as a GIF. */
+  const isGif = $derived(job.mediaKind === "gif");
 
   const dirty = $derived(isStill ? crop !== null : isTrimmed || crop !== null);
   // Nothing to do only when it already fits *and* hasn't been edited. In keep
@@ -363,6 +365,17 @@
   const pct = (t: number) => (duration > 0 ? (t / duration) * 100 : 0);
 
   async function compress() {
+    // Pressing this is the whole permission slip for re-encoding a GIF, which
+    // is left alone anywhere else in the app. Without it a GIF asked to shrink
+    // would be copied instead and report itself done having changed nothing.
+    if (isGif) {
+      app.setEdits(job.id, {
+        start: inPoint > 0.01 ? inPoint : null,
+        end: effectiveOut < duration - 0.01 ? effectiveOut : null,
+        crop: crop ? { ...crop } : null,
+        forceEncode: true,
+      });
+    }
     await app.closeEditor();
     await app.start(job.id);
   }
