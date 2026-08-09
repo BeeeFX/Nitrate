@@ -151,6 +151,7 @@ const SITES = [
     label: true,
     // Its posts are custom elements that hide their controls in shadow roots.
     deep: true,
+    copyStyle: true,
     // Deliberately not the credit bar: that's the byline above the title, which
     // is where the button ended up looking like a stray banner. These all sit
     // in the vote/comment/share row along the bottom, where it belongs.
@@ -359,9 +360,21 @@ function deepQuery(root, selector) {
   const direct = root.querySelector(selector);
   if (direct) return direct;
 
-  // Breadth-first through open shadow roots. Closed ones stay invisible, but
+  // The root's *own* shadow root first. Missing this was the bug: a Reddit
+  // post keeps its action row inside its own shadow root, so searching only
+  // the descendants' roots found nothing on a feed — while an opened post,
+  // which has the same controls in the light DOM, worked fine. One symptom,
+  // two completely different pages.
+  if (root.shadowRoot) {
+    const own = root.shadowRoot.querySelector(selector);
+    if (own) return own;
+  }
+
+  // Then breadth-first through the rest. Closed roots stay invisible, but
   // nothing here uses them.
   const queue = Array.from(root.querySelectorAll("*"));
+  if (root.shadowRoot) queue.push(...root.shadowRoot.querySelectorAll("*"));
+
   while (queue.length) {
     const node = queue.shift();
     const shadow = node.shadowRoot;
@@ -373,6 +386,37 @@ function deepQuery(root, selector) {
   }
 
   return null;
+}
+
+/**
+ * Have we already placed a button in here?
+ *
+ * Has to see into shadow roots for the same reason the anchor search does.
+ * When it couldn't, every pass concluded the post was untouched and added
+ * another one — 28 Reddit posts had collected 199 buttons between them, because
+ * the button sits in a shadow root the check couldn't look into. The floating
+ * fallback stayed up for the same reason: it only stands down once an inline
+ * button is visible to this, and none ever were.
+ */
+function hasButton(root, selector) {
+  if (!root?.querySelector) return false;
+  if (root.querySelector(selector)) return true;
+  if (!site.deep) return false;
+
+  if (root.shadowRoot?.querySelector(selector)) return true;
+
+  const queue = Array.from(root.querySelectorAll("*"));
+  if (root.shadowRoot) queue.push(...root.shadowRoot.querySelectorAll("*"));
+
+  while (queue.length) {
+    const node = queue.shift();
+    const shadow = node.shadowRoot;
+    if (!shadow) continue;
+    if (shadow.querySelector(selector)) return true;
+    queue.push(...shadow.querySelectorAll("*"));
+  }
+
+  return false;
 }
 
 function findAnchor(root) {
@@ -496,6 +540,21 @@ function adoptStyle(button, row) {
   button.dataset.nitrateAdopted = "1";
 }
 
+/**
+ * A shadow root doesn't inherit the page's styles, so anything placed inside
+ * one arrives naked. The sheet is cloned into each root we touch, once.
+ */
+function styleShadowRoot(button) {
+  const root = button.getRootNode?.();
+  if (!root || root === document || !root.host) return;
+  if (root.querySelector("style[data-nitrate-style]")) return;
+
+  const style = document.createElement("style");
+  style.setAttribute("data-nitrate-style", "1");
+  style.textContent = STYLE_TEXT;
+  root.appendChild(style);
+}
+
 function place(anchor, button, placement) {
   if (placement === "after") anchor.after(button);
   else if (placement === "prepend") anchor.prepend(button);
@@ -544,7 +603,7 @@ function scan() {
       // short-circuits — meaning if the fallback ever appears before the action
       // row has rendered, it wins permanently and the inline button never
       // arrives. That's timing-dependent, which is why it came and went.
-      if (root.querySelector?.(`[${MARK}]:not(.nitrate-floating)`)) {
+      if (hasButton(root, `[${MARK}]:not(.nitrate-floating)`)) {
         // Re-read on every pass: the theme switch changes the pills without
         // replacing them, and a button placed under the old colours would
         // otherwise keep them.
@@ -559,7 +618,7 @@ function scan() {
     // — checking the scope as a whole would leave every reel after the first
     // one bare, since they share `main`.
     for (const cluster of findActionClusters(root)) {
-      if (cluster.querySelector?.(`[${MARK}]`)) continue;
+      if (hasButton(cluster, `[${MARK}]`)) continue;
       attach(cluster, scope);
     }
   }
@@ -581,6 +640,7 @@ function attach(node, scope, placement) {
   }
 
   place(node, button, where);
+  styleShadowRoot(button);
   // After placing, so the reference button is measured in its final context.
   if (site.copyStyle) adoptStyle(button, button.parentElement ?? node);
 }
@@ -597,7 +657,7 @@ function refreshStyles(root) {
  * still works on a page whose markup has moved on.
  */
 function ensureFallback() {
-  const hasInline = document.querySelector(`[${MARK}]:not(.nitrate-floating)`);
+  const hasInline = hasButton(document, `[${MARK}]:not(.nitrate-floating)`);
   const existing = document.querySelector(".nitrate-floating");
 
   if (hasInline) {
@@ -683,9 +743,7 @@ function watchSettings() {
  * YouTube pill next to Instagram's bare 24px icons would look wrong either way
  * round.
  */
-function injectStyles() {
-  const style = document.createElement("style");
-  style.textContent = `
+const STYLE_TEXT = `
     .nitrate-send {
       display: inline-flex;
       align-items: center;
@@ -833,6 +891,8 @@ function injectStyles() {
     .nitrate-send[data-site="twitch"]:not(:has(.nitrate-label)) { width: 32px; padding: 0; }
 
     /* Reddit's action row is 32px pills with 12px text. */
+    /* Measured off the inner button in Reddit's own shadow root: the wrapping
+       custom element computes to 14px, the control you actually see is 12. */
     .nitrate-send[data-site="reddit"] { font-size: 12px; }
 
     .nitrate-send.nitrate-floating {
@@ -850,7 +910,11 @@ function injectStyles() {
     }
     .nitrate-send.nitrate-floating .nitrate-icon { color: #fff; }
     .nitrate-send.nitrate-floating:hover { background: #6b76f5; }
-  `;
+`;
+
+function injectStyles() {
+  const style = document.createElement("style");
+  style.textContent = STYLE_TEXT;
   (document.head || document.documentElement).appendChild(style);
 }
 
