@@ -253,6 +253,19 @@ function clipFixture(body) {
   return row;
 }
 
+/** A live channel page: the same share button a VOD has, nothing recorded. */
+function liveFixture(body) {
+  const row = makeElement("div");
+  row.rect = { width: 400, height: 32, top: 500, left: 500 };
+
+  const share = makeElement("button", { "data-a-target": "share-button" });
+  share.textContent = "Share";
+  row.appendChild(share);
+
+  body.appendChild(row);
+  return row;
+}
+
 function makeSandbox(hostname, pathname, fixture) {
   const body = makeElement("body");
   const head = makeElement("head");
@@ -415,6 +428,29 @@ async function main() {
     }
   } catch (error) {
     fail(`clip row: ${error.message}`);
+  }
+
+  // A live channel has nothing finished behind it. The share button is right
+  // there and would otherwise be taken as an anchor, so this is the check that
+  // the page itself is being judged and not just the markup on it.
+  for (const [what, pathname] of [
+    ["a live channel", "/somestreamer"],
+    ["the directory", "/directory/game/Chess"],
+    ["a channel's video list", "/somestreamer/videos"],
+  ]) {
+    try {
+      const { sandbox } = await run("content.js", "www.twitch.tv", pathname, liveFixture);
+      const placed = descendants(sandbox.document.body).filter((node) =>
+        node.hasAttribute?.(MARK),
+      );
+      if (placed.length > 0) {
+        fail(`${what}: ${placed.length} button(s) placed where there's nothing to download`);
+      } else {
+        console.log(`  ok    ${what}: no button`);
+      }
+    } catch (error) {
+      fail(`${what}: ${error.message}`);
+    }
   }
 
   try {

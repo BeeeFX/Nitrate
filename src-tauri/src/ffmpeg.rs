@@ -479,3 +479,51 @@ fn drain(mut r: impl Read) {
     let mut buf = Vec::new();
     let _ = r.read_to_end(&mut buf);
 }
+
+/// Builds a copy of a video the webview is certain to be able to play.
+///
+/// The editor previews by handing the file to a `<video>` element, so what can
+/// be played is whatever the webview's decoder happens to support. That is not
+/// the same list as the codecs this app can *produce* — AV1, HEVC and some
+/// containers are missing depending on the runtime and the machine — and when
+/// it can't decode one, the play button goes dead with nothing to explain it.
+///
+/// Plain H.264 in MP4 is the one thing every webview plays. Scaled down and
+/// silent, because this is a thing to look at while setting trim points, not
+/// the output: the preview element is muted, so the audio was never heard.
+///
+/// Timing is left exactly alone. Trim points are read off this and applied to
+/// the original, so a proxy that drifted would silently cut the wrong frames.
+pub fn preview_proxy(bins: &Binaries, input: &Path, out: &Path) -> Result<(), String> {
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Couldn't create the preview folder: {e}"))?;
+    }
+
+    let status = base_command(&bins.ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .arg("-i")
+        .arg(input)
+        // Only downscale. Enlarging a small clip would cost time and add
+        // nothing, and `min` keeps anything already under 720 as it is.
+        // The comma is escaped: unescaped it would read as the separator
+        // between two filters in a graph rather than an argument to `min`.
+        .args(["-vf", r"scale=-2:min(720\,ih)"])
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
+        // Baseline-ish: no feature a webview might not have. This is the
+        // fallback, so it cannot afford to need a fallback of its own.
+        .args(["-profile:v", "high", "-pix_fmt", "yuv420p"])
+        .args(["-an", "-movflags", "+faststart"])
+        .arg(out)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("Couldn't run ffmpeg: {e}"))?;
+
+    if !status.success() {
+        let _ = std::fs::remove_file(out);
+        return Err("Couldn't build a preview for that video.".into());
+    }
+    Ok(())
+}

@@ -16,13 +16,18 @@
   const sourceW = $derived(job.info?.width ?? 0);
   const sourceH = $derived(job.info?.height ?? 0);
 
-  // Playback is preferred, but the webview can only decode some formats — MKV
-  // and ProRes it simply won't touch. Those fall back to stills pulled with
-  // ffmpeg, which is slower to scrub but works for everything.
+  // Playback is preferred, and the file itself is tried first. What a webview
+  // can decode is not the same list as what this app can produce, though — AV1
+  // and HEVC depend on the runtime and the machine, and some containers it
+  // won't touch at all. Anything it refuses gets re-encoded to plain H.264 and
+  // played from that instead, so every codec here is playable.
   let videoSrc = $state<string | null>(null);
   let videoEl = $state<HTMLVideoElement | null>(null);
   let canPlay = $state(false);
   let playing = $state(false);
+  /** Building the stand-in copy. Only ever true briefly, and only once. */
+  let proxying = $state(false);
+  let proxyTried = $state(false);
 
   let frame = $state<string | null>(null);
   let strip = $state<string[]>([]);
@@ -107,9 +112,46 @@
 
   $effect(() => {
     if (!job.path) return;
+    proxyTried = false;
     void invoke<string>("allow_preview", { path: job.path })
       .then((p) => (videoSrc = convertFileSrc(p)))
       .catch(() => (videoSrc = null));
+  });
+
+  /**
+   * Re-encodes to something the webview will definitely play.
+   *
+   * Tried once per file, and only after the real one has failed — there's no
+   * point spending an encode on a video that plays fine as it is.
+   */
+  async function useProxy() {
+    if (proxyTried || !job.path) return;
+    proxyTried = true;
+    proxying = true;
+    try {
+      const stand_in = await invoke<string>("preview_proxy", { path: job.path });
+      videoSrc = convertFileSrc(stand_in);
+    } catch {
+      // Nothing more to try. Scrubbing through frames still works, which is
+      // what the editor did for these files before there was a proxy at all.
+      videoSrc = null;
+    } finally {
+      proxying = false;
+    }
+  }
+
+  /**
+   * A decoder it lacks doesn't always announce itself.
+   *
+   * Some files error outright, which is handled on the element. Others load
+   * their metadata, report a duration, and then never become playable — no
+   * error, no `canplay`, just a dead play button. Waiting a moment and giving
+   * up covers both without re-encoding anything that was going to work.
+   */
+  $effect(() => {
+    if (!videoSrc || canPlay || proxyTried) return;
+    const timer = setTimeout(() => void useProxy(), 4000);
+    return () => clearTimeout(timer);
   });
 
   async function loadFrame(at: number) {
@@ -419,7 +461,7 @@
           oncanplay={() => (canPlay = true)}
           onerror={() => {
             canPlay = false;
-            videoSrc = null;
+            void useProxy();
           }}
           onplay={onPlay}
           onpause={onPause}
@@ -431,6 +473,11 @@
           <img src={frame} alt="" draggable="false" />
         {:else}
           <div class="frame-loading">Reading frame…</div>
+        {/if}
+        <!-- Scrubbing already works by this point, so this says why playback
+             isn't there yet rather than blocking the frame underneath. -->
+        {#if proxying}
+          <div class="proxy-note">Preparing playback…</div>
         {/if}
       {/if}
 
@@ -540,7 +587,9 @@
             disabled={!canPlay}
             title={canPlay
               ? "Play the selection"
-              : "This format can't be played here — scrub the timeline instead"}
+              : proxying
+                ? "Preparing playback for this format…"
+                : "Scrub the timeline to preview this one"}
             aria-label={playing ? "Pause" : "Play"}
           >
             {#if playing}
@@ -778,6 +827,22 @@
     height: 100%;
     font-size: 12px;
     color: var(--text-faint);
+  }
+
+  /* Sits over the frame rather than replacing it — the frame is the useful
+     thing while this is happening, and scrubbing already works. */
+  .proxy-note {
+    position: absolute;
+    left: 50%;
+    bottom: 10px;
+    transform: translateX(-50%);
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.7);
+    font-size: 11px;
+    color: var(--text-dim);
+    pointer-events: none;
+    white-space: nowrap;
   }
 
   /* One enormous shadow rather than four bands: exact by construction, and

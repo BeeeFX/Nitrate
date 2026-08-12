@@ -949,3 +949,78 @@ fn the_editor_can_shrink_a_gif_without_cropping_it() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Editor preview
+// ---------------------------------------------------------------------------
+
+/// Builds a clip in a codec the webview may or may not decode.
+fn make_clip_in(dir: &Path, name: &str, encoder: &str, extra: &[&str]) -> PathBuf {
+    let bins = ffmpeg::resolve();
+    let out = dir.join(name);
+
+    let status = Command::new(&bins.ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=24:duration=3",
+        ])
+        .args(["-c:v", encoder])
+        .args(extra)
+        .arg(&out)
+        .status()
+        .expect("ffmpeg should run");
+
+    assert!(status.success(), "building a {encoder} clip failed");
+    out
+}
+
+#[test]
+fn every_codec_the_app_offers_gets_a_playable_preview() {
+    let dir = temp_dir("preview-proxy");
+    let bins = ffmpeg::resolve();
+
+    // The four the settings panel offers, plus the container the webview is
+    // least likely to touch. What the editor can play should not depend on
+    // which of these the file happens to be in.
+    let cases: [(&str, &str, &[&str]); 5] = [
+        ("av1.mp4", "libsvtav1", &["-preset", "12"]),
+        (
+            "hevc.mp4",
+            "libx265",
+            &["-preset", "ultrafast", "-tag:v", "hvc1"],
+        ),
+        ("vp9.webm", "libvpx-vp9", &["-deadline", "realtime"]),
+        ("h264.mp4", "libx264", &["-preset", "ultrafast"]),
+        ("h264.mkv", "libx264", &["-preset", "ultrafast"]),
+    ];
+
+    for (name, encoder, extra) in cases {
+        let input = make_clip_in(&dir, name, encoder, extra);
+        let source = ffmpeg::probe(&bins, &input).expect("probe the source");
+
+        let proxy = dir.join(format!("proxy-{name}.mp4"));
+        ffmpeg::preview_proxy(&bins, &input, &proxy)
+            .unwrap_or_else(|e| panic!("no preview for {name}: {e}"));
+
+        let made = ffmpeg::probe(&bins, &proxy).expect("probe the preview");
+        println!(
+            "{name} -> h264, {}x{}, {:.2}s",
+            made.width, made.height, made.duration
+        );
+
+        // Trim points are read off this and applied to the original, so a
+        // preview that ran to a different length would cut the wrong frames.
+        assert!(
+            (made.duration - source.duration).abs() < 0.15,
+            "{name}: preview is {:.3}s against a source of {:.3}s",
+            made.duration,
+            source.duration
+        );
+        assert!(made.width > 0 && made.height > 0, "{name}: empty preview");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

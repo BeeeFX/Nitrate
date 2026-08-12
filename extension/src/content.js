@@ -109,6 +109,21 @@ const SITES = [
   {
     id: "twitch",
     matches: () => /(^|\.)twitch\.tv$/.test(location.hostname),
+    // A live channel has nothing finished to fetch — the stream hasn't ended,
+    // so there's no file behind it and the button was offering something that
+    // doesn't exist yet. VODs and clips are recordings, and those work.
+    //
+    // Checked per pass rather than once, because Twitch swaps between a
+    // channel and a VOD without reloading the page.
+    enabled: () => {
+      if (/(^|\.)clips\.twitch\.tv$/.test(location.hostname)) return true;
+      return (
+        /^\/videos\/\d+/.test(location.pathname) ||
+        /^\/[^/]+\/clip\/[^/]+/.test(location.pathname) ||
+        // The older address for a VOD, still handed out by some links.
+        /^\/[^/]+\/v\/\d+/.test(location.pathname)
+      );
+    },
     scope: null,
     label: true,
     copyStyle: true,
@@ -614,6 +629,15 @@ function scopes() {
 }
 
 function scan() {
+  // Some pages on a supported site have nothing to offer — a Twitch channel
+  // that's live rather than a recording. Both directions matter: navigating
+  // onto one has to take the button away, and these are single-page apps, so
+  // "away" means removing it rather than never having added it.
+  if (site.enabled && !site.enabled()) {
+    for (const button of document.querySelectorAll(`[${MARK}]`)) button.remove();
+    return;
+  }
+
   // A button placed before the page finished rendering can land in the wrong
   // group, and because a placed button stops the search it would stay there for
   // the life of the tab. Dropping the misplaced one lets the next pass — by

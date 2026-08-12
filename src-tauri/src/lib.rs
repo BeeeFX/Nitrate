@@ -291,6 +291,57 @@ async fn frame_at(
 ///
 /// The scope is extended per file rather than opened to the whole disk: only
 /// videos the user has actually added become readable.
+/// A copy of the video the webview is certain to play, for the editor.
+///
+/// Asked for only once the `<video>` element has given up on the original, so
+/// nothing is re-encoded for a file that plays perfectly well. Cached by what
+/// the file is rather than only where it is, so a re-downloaded file at the
+/// same path doesn't keep showing the previous preview.
+#[tauri::command]
+async fn preview_proxy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<String, String> {
+    let input = PathBuf::from(&path);
+    if !input.is_file() {
+        return Err("That file doesn't exist.".into());
+    }
+
+    let out = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("No cache folder: {e}"))?
+        .join("previews")
+        .join(format!("{}.mp4", preview_key(&input)));
+
+    if !out.is_file() {
+        ffmpeg::preview_proxy(&state.bins, &input, &out)?;
+    }
+
+    app.asset_protocol_scope()
+        .allow_file(&out)
+        .map_err(|e| format!("Couldn't grant preview access: {e}"))?;
+    Ok(out.to_string_lossy().into_owned())
+}
+
+/// Names a preview after the file's identity, not just its path.
+fn preview_key(input: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    input.hash(&mut hasher);
+    if let Ok(meta) = std::fs::metadata(input) {
+        meta.len().hash(&mut hasher);
+        if let Ok(modified) = meta.modified() {
+            if let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) {
+                since.as_secs().hash(&mut hasher);
+            }
+        }
+    }
+    format!("preview-{:016x}", hasher.finish())
+}
+
 #[tauri::command]
 fn allow_preview(app: AppHandle, path: String) -> Result<String, String> {
     let file = PathBuf::from(&path);
@@ -955,6 +1006,7 @@ pub fn run() {
             filmstrip,
             set_editor_size,
             allow_preview,
+            preview_proxy,
             open_video,
             copy_video_to_clipboard,
             window_drag_started,
