@@ -65,7 +65,7 @@
     "createUpdaterArtifacts": true,
     "category": "Utility",
     "shortDescription": "Compress video to fit Discord's upload limits",
-    "longDescription": "Nitrate compresses any video to a target file size — Discord's 10MB free limit, Nitro tiers, or any size you pick. Drag, drop, done.",
+    "longDescription": "Nitrate compresses any video to a target file size — Discord's 20MB free limit, Nitro tiers, or any size you pick. Drag, drop, done.",
     "copyright": "MIT licensed",
     "icon": [
       "icons/32x32.png",

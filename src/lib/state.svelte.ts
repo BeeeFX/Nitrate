@@ -66,6 +66,18 @@ class AppStore {
   copyWhenDone = $state(false);
   /** True until the walkthrough has been seen. */
   showTour = $state(false);
+  /**
+   * How loud the editor's preview plays, and whether it's silenced.
+   *
+   * Kept here rather than in the editor because that component is rebuilt for
+   * every video — a volume set on one clip would otherwise be forgotten by the
+   * next one, which is the opposite of what a volume control is for.
+   *
+   * Audible by default: judging a trim by ear is most of the point of playing
+   * it, and nothing plays until the play button is pressed.
+   */
+  previewMuted = $state(false);
+  previewVolume = $state(0.8);
 
   #store: Store | null = null;
 
@@ -148,6 +160,14 @@ class AppStore {
       if (typeof links === "boolean") this.browserLinksAutoStart = links;
       const copy = await this.#store.get<boolean>("copyWhenDone");
       if (typeof copy === "boolean") this.copyWhenDone = copy;
+      const muted = await this.#store.get<boolean>("previewMuted");
+      if (typeof muted === "boolean") this.previewMuted = muted;
+      const volume = await this.#store.get<number>("previewVolume");
+      // Clamped on the way in: a hand-edited store shouldn't be able to hand
+      // the media element a value it will throw on.
+      if (typeof volume === "number" && Number.isFinite(volume)) {
+        this.previewVolume = Math.min(Math.max(volume, 0), 1);
+      }
       // Absent means this is a first run, which is exactly when the tour helps.
       this.showTour = (await this.#store.get<boolean>("tourSeen")) !== true;
     } catch {
@@ -163,6 +183,8 @@ class AppStore {
       await this.#store.set("pinned", this.pinned);
       await this.#store.set("browserLinksAutoStart", this.browserLinksAutoStart);
       await this.#store.set("copyWhenDone", this.copyWhenDone);
+      await this.#store.set("previewMuted", this.previewMuted);
+      await this.#store.set("previewVolume", this.previewVolume);
       await this.#store.set("tourSeen", !this.showTour);
       await this.#store.save();
     } catch {

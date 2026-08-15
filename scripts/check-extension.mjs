@@ -164,6 +164,7 @@ function matchesOne(node, selector) {
   if (selector === "button") return node.tagName === "BUTTON";
   if (selector === "main") return node.tagName === "MAIN";
   if (selector === "article") return node.tagName === "ARTICLE";
+  if (selector === "video") return node.tagName === "VIDEO";
   if (selector === "nav" || selector === "header" || selector === "aside") {
     return node.tagName === selector.toUpperCase();
   }
@@ -171,9 +172,18 @@ function matchesOne(node, selector) {
     const wanted = selector.slice(7, -2);
     return node.getAttribute("role") === wanted;
   }
-  // A bare [attr="value"] selector, which is how the Twitch row is anchored.
-  const attribute = selector.match(/^\[([\w-]+)="([^"]+)"\]$/);
-  if (attribute) return node.getAttribute(attribute[1]) === attribute[2];
+  // An [attr="value"] selector, optionally qualified by tag and optionally
+  // case-insensitive — how both Twitch rows are anchored. The VOD's Share
+  // button carries no data attribute at all, so `button[aria-label="Share" i]`
+  // is the only thing left to name it by.
+  const attribute = selector.match(/^([a-z]+)?\[([\w-]+)="([^"]+)"( i)?\]$/i);
+  if (attribute) {
+    const [, tag, name, value, insensitive] = attribute;
+    if (tag && node.tagName !== tag.toUpperCase()) return false;
+    const actual = node.getAttribute(name);
+    if (actual === null) return false;
+    return insensitive ? actual.toLowerCase() === value.toLowerCase() : actual === value;
+  }
   // Anything else is a site-specific selector that this fixture doesn't model,
   // which is the point — the structural pass is what's under test.
   return false;
@@ -251,6 +261,93 @@ function clipFixture(body) {
 
   body.appendChild(row);
   return row;
+}
+
+/**
+ * A Twitch VOD's action row.
+ *
+ * Nothing in here carries a `data-a-target` or a `data-test-selector` — the
+ * real page has none on these buttons — so the Share button's label is the
+ * only hook, and it sits under four single-child wrappers rather than in the
+ * row itself. The row holds two controls, one short of the three the
+ * structural pass needs, so nothing catches this if the anchor misses: it went
+ * straight to the corner, which is the bug.
+ */
+function vodFixture(body) {
+  const row = makeElement("div");
+  row.rect = { width: 129, height: 32, top: 284, left: 800 };
+
+  const share = makeElement("button", { "aria-label": "Share" });
+  share.textContent = "Share";
+  // Buried, as the real one is. The depth is deliberately not the number the
+  // anchor climbs — it stops at the first ancestor holding a row, whatever
+  // that turns out to be.
+  let wrapped = share;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const wrapper = makeElement("div");
+    wrapper.appendChild(wrapped);
+    wrapped = wrapper;
+  }
+  row.appendChild(wrapped);
+
+  const overflow = makeElement("button", { "aria-label": "More" });
+  row.appendChild(overflow);
+
+  body.appendChild(row);
+  return row;
+}
+
+/**
+ * An Instagram DM thread.
+ *
+ * Its header (call, video, info) and its composer (mic, photo, sticker) are
+ * both rows of labelled icons inside buttons — the exact shape the structural
+ * pass hunts for — so it used to hang a button off each of them, pointing at
+ * the conversation rather than at any video. With `withViewer`, a shared clip
+ * has been opened into the modal, which is the one case there's something to
+ * send.
+ */
+function dmFixture(body, withViewer) {
+  const main = makeElement("main");
+  main.rect = { width: 1100, height: 900, top: 0, left: 220 };
+
+  const iconRow = (labels, rect) => {
+    const row = makeElement("div");
+    row.rect = rect;
+    for (const label of labels) {
+      const control = makeElement("button");
+      control.appendChild(makeElement("svg", { "aria-label": label }));
+      row.appendChild(control);
+    }
+    main.appendChild(row);
+  };
+
+  iconRow(["Audio call", "Video call", "Conversation information"], {
+    width: 300, height: 44, top: 0, left: 800,
+  });
+  iconRow(["Voice clip", "Add photo or video", "Choose a sticker"], {
+    width: 300, height: 44, top: 850, left: 800,
+  });
+  body.appendChild(main);
+
+  if (!withViewer) return { main, viewer: null };
+
+  const viewer = makeElement("div", { role: "dialog" });
+  viewer.rect = { width: 900, height: 800, top: 40, left: 300 };
+  viewer.appendChild(makeElement("video"));
+  viewer.appendChild(makeElement("a", { href: "/reel/xyz/" }));
+
+  const actions = makeElement("div");
+  actions.rect = { width: 200, height: 40, top: 780, left: 320 };
+  for (const label of ["Like", "Comment", "Share"]) {
+    const control = makeElement("button");
+    control.appendChild(makeElement("svg", { "aria-label": label }));
+    actions.appendChild(control);
+  }
+  viewer.appendChild(actions);
+  body.appendChild(viewer);
+
+  return { main, viewer };
 }
 
 /** A live channel page: the same share button a VOD has, nothing recorded. */
@@ -428,6 +525,74 @@ async function main() {
     }
   } catch (error) {
     fail(`clip row: ${error.message}`);
+  }
+
+  // A VOD is not a clip page, and none of the clip anchors exist on it. The
+  // button has to reach the row anyway, and land before the overflow menu.
+  try {
+    const { extras: row, logs } = await run(
+      "content.js",
+      "www.twitch.tv",
+      "/videos/2833641956",
+      vodFixture,
+    );
+    const index = row.children.findIndex((child) => child.hasAttribute(MARK));
+    if (index === -1) {
+      fail("VOD row: no button was placed");
+    } else if (index !== row.children.length - 2) {
+      fail(`VOD row: button landed at ${index} of ${row.children.length}, wanted second from the end`);
+    } else if (logs.some((line) => line.includes("floating button"))) {
+      fail("VOD row: fell back to the corner button despite finding the row");
+    } else {
+      console.log("  ok    VOD row: button sits before the overflow menu");
+    }
+  } catch (error) {
+    fail(`VOD row: ${error.message}`);
+  }
+
+  // A DM thread on its own offers nothing to compress, and its chrome is shaped
+  // exactly like an action row — so this is the check that the page is being
+  // judged rather than the markup. The corner button counts as a failure too:
+  // it would send the conversation.
+  try {
+    const { sandbox } = await run(
+      "content.js",
+      "www.instagram.com",
+      "/direct/t/17999",
+      (body) => dmFixture(body, false),
+    );
+    const placed = descendants(sandbox.document.body).filter((node) =>
+      node.hasAttribute?.(MARK),
+    );
+    if (placed.length > 0) {
+      fail(`instagram DMs: ${placed.length} button(s) placed in a conversation`);
+    } else {
+      console.log("  ok    instagram DMs: no button in the conversation");
+    }
+  } catch (error) {
+    fail(`instagram DMs: ${error.message}`);
+  }
+
+  // Open a shared clip, though, and there's exactly one video to point at.
+  try {
+    const { sandbox, extras } = await run(
+      "content.js",
+      "www.instagram.com",
+      "/direct/t/17999",
+      (body) => dmFixture(body, true),
+    );
+    const placed = descendants(sandbox.document.body).filter((node) =>
+      node.hasAttribute?.(MARK),
+    );
+    if (placed.length !== 1) {
+      fail(`instagram DM viewer: ${placed.length} button(s), wanted exactly 1`);
+    } else if (!extras.viewer.contains(placed[0])) {
+      fail("instagram DM viewer: the button landed outside the opened video");
+    } else {
+      console.log("  ok    instagram DM viewer: one button, inside the video");
+    }
+  } catch (error) {
+    fail(`instagram DM viewer: ${error.message}`);
   }
 
   // A live channel has nothing finished behind it. The share button is right

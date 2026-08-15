@@ -12,7 +12,7 @@
     },
     {
       title: "Pick a size, drop a video",
-      body: "Choose the limit you're up against — 10 MB free, or a Nitro tier — then drop files in. They land in your Downloads folder small enough to send.",
+      body: "Choose the limit you're up against — 20 MB free, or a Nitro tier — then drop files in. They land in your Downloads folder small enough to send.",
       icon: "drop",
     },
     {

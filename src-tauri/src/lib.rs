@@ -325,11 +325,21 @@ async fn preview_proxy(
     Ok(out.to_string_lossy().into_owned())
 }
 
+/// Bumped whenever `ffmpeg::preview_proxy` starts producing a different file.
+///
+/// Previews are cached by the identity of their *source*, which never changes
+/// when it's our own recipe that moved — so without this, everyone who had
+/// already previewed an AV1 clip would keep the silent proxy built before the
+/// editor could play sound, and the volume control would do nothing on exactly
+/// the files that need it.
+const PREVIEW_REVISION: u32 = 2;
+
 /// Names a preview after the file's identity, not just its path.
 fn preview_key(input: &Path) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    PREVIEW_REVISION.hash(&mut hasher);
     input.hash(&mut hasher);
     if let Ok(meta) = std::fs::metadata(input) {
         meta.len().hash(&mut hasher);

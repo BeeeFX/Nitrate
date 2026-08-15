@@ -40,9 +40,15 @@ export interface Tier {
 /**
  * Discord's upload ceilings. Sizes are decimal MB, which combined with the
  * safety margin keeps us clear of the limit however Discord counts it.
+ *
+ * The free ceiling moved from 10 MB to 20 MB, and the old one is kept beside
+ * it: the raise reached clients gradually, and a server that hasn't caught up
+ * still bounces anything over ten. Better to offer both than to have someone
+ * compress twice.
  */
 export const TIERS: Tier[] = [
-  { id: "free", label: "Free", sub: "10 MB", bytes: 10_000_000 },
+  { id: "free-old", label: "Old Free", sub: "10 MB", bytes: 10_000_000 },
+  { id: "free", label: "New Free", sub: "20 MB", bytes: 20_000_000 },
   { id: "basic", label: "Nitro Basic", sub: "50 MB", bytes: 50_000_000 },
   { id: "boost", label: "Boost L3", sub: "100 MB", bytes: 100_000_000 },
   { id: "nitro", label: "Nitro", sub: "500 MB", bytes: 500_000_000 },
@@ -166,7 +172,7 @@ export function audioCodecsFor(container: Container): AudioCodec[] {
 export const DEFAULT_SETTINGS: Settings = {
   mode: "size",
   quality: "balanced",
-  targetBytes: 10_000_000,
+  targetBytes: 20_000_000,
   videoCodec: "h264",
   container: "mp4",
   audioCodec: "aac",

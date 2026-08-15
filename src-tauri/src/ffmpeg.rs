@@ -488,9 +488,15 @@ fn drain(mut r: impl Read) {
 /// containers are missing depending on the runtime and the machine — and when
 /// it can't decode one, the play button goes dead with nothing to explain it.
 ///
-/// Plain H.264 in MP4 is the one thing every webview plays. Scaled down and
-/// silent, because this is a thing to look at while setting trim points, not
-/// the output: the preview element is muted, so the audio was never heard.
+/// Plain H.264 in MP4 is the one thing every webview plays, scaled down because
+/// this is a thing to glance at while setting trim points rather than the
+/// output.
+///
+/// It keeps its sound. The editor can play the preview aloud, and a proxy is
+/// exactly the case where that matters most — these are the files the webview
+/// couldn't decode, so the proxy is the only version there is to listen to.
+/// Stereo AAC for the same reason the video is H.264: it is the pairing nothing
+/// refuses.
 ///
 /// Timing is left exactly alone. Trim points are read off this and applied to
 /// the original, so a proxy that drifted would silently cut the wrong frames.
@@ -513,7 +519,11 @@ pub fn preview_proxy(bins: &Binaries, input: &Path, out: &Path) -> Result<(), St
         // Baseline-ish: no feature a webview might not have. This is the
         // fallback, so it cannot afford to need a fallback of its own.
         .args(["-profile:v", "high", "-pix_fmt", "yuv420p"])
-        .args(["-an", "-movflags", "+faststart"])
+        // A source with no audio simply produces no audio stream here, so this
+        // needs no guard. Downmixed because a webview that plays AAC does not
+        // necessarily play 5.1.
+        .args(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
+        .args(["-movflags", "+faststart"])
         .arg(out)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

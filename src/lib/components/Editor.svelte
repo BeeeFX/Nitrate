@@ -221,7 +221,16 @@
     if (videoEl.currentTime < inPoint || videoEl.currentTime >= effectiveOut) {
       videoEl.currentTime = inPoint;
     }
-    void videoEl.play();
+    void videoEl.play().catch(() => {
+      // Audible playback can be refused outright. A click on our own button
+      // satisfies the autoplay policy in every webview tested, but the rule is
+      // the runtime's to make and it costs nothing to survive a no: silence is
+      // recoverable, a play button that does nothing isn't.
+      if (!videoEl) return;
+      app.previewMuted = true;
+      videoEl.muted = true;
+      void videoEl.play().catch(() => {});
+    });
   }
 
   function onPlay() {
@@ -240,6 +249,49 @@
   }
 
   $effect(() => () => cancelAnimationFrame(raf));
+
+  // ---------------------------------------------------------------------
+  // Sound
+  // ---------------------------------------------------------------------
+
+  /**
+   * Whether there is anything to hear.
+   *
+   * A photo has no timeline at all, and a GIF has no audio track by
+   * definition, so both would get a control that does nothing. A video whose
+   * probe found no audio stream is the same case.
+   */
+  const hasAudio = $derived(!isStill && !isGif && Boolean(job.info?.audioCodec));
+
+  /**
+   * Volume is applied to the element rather than set in the markup: it's a
+   * property with no attribute behind it, and the element is rebuilt when the
+   * proxy takes over, so this re-runs and the replacement starts out matching
+   * instead of reverting to full volume.
+   */
+  $effect(() => {
+    if (!videoEl) return;
+    videoEl.muted = app.previewMuted || !hasAudio;
+    videoEl.volume = app.previewVolume;
+  });
+
+  function toggleMute() {
+    app.previewMuted = !app.previewMuted;
+    void app.persist();
+  }
+
+  function onVolumeInput(event: Event) {
+    const raw = Number((event.currentTarget as HTMLInputElement).value);
+    if (!Number.isFinite(raw)) return;
+    app.previewVolume = Math.min(Math.max(raw, 0), 1);
+    // Pulling the slider up is itself a request to hear it.
+    if (app.previewVolume > 0) app.previewMuted = false;
+  }
+
+  // Written on release rather than per pixel of travel — the store is a file.
+  function saveVolume() {
+    void app.persist();
+  }
 
   // ---------------------------------------------------------------------
   // Crop
@@ -455,7 +507,6 @@
           bind:this={videoEl}
           src={videoSrc}
           class:hidden={!canPlay}
-          muted
           playsinline
           preload="auto"
           oncanplay={() => (canPlay = true)}
@@ -602,6 +653,54 @@
               >
             {/if}
           </button>
+
+          <!-- Only where there's a track to play. A dead volume knob on a
+               silent clip is worse than no knob at all. -->
+          {#if hasAudio}
+            <div class="volume" class:off={app.previewMuted}>
+              <button
+                class="mute"
+                onclick={toggleMute}
+                disabled={!canPlay}
+                title={app.previewMuted ? "Unmute" : "Mute"}
+                aria-label={app.previewMuted ? "Unmute" : "Mute"}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor" />
+                  {#if app.previewMuted}
+                    <path
+                      d="M16.5 9.5l5 5M21.5 9.5l-5 5"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      fill="none"
+                    />
+                  {:else}
+                    <path
+                      d="M16 8.6a4.2 4.2 0 0 1 0 6.8"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      fill="none"
+                    />
+                  {/if}
+                </svg>
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={app.previewMuted ? 0 : app.previewVolume}
+                oninput={onVolumeInput}
+                onchange={saveVolume}
+                disabled={!canPlay}
+                title="Preview volume"
+                aria-label="Preview volume"
+              />
+            </div>
+          {/if}
+
           <span>{formatDuration(inPoint)}</span>
         </div>
 
@@ -1069,6 +1168,72 @@
   .play:disabled {
     opacity: 0.35;
     cursor: default;
+  }
+
+  .volume {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .mute {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    color: var(--text-dim);
+    transition: background 0.14s, color 0.14s;
+  }
+
+  .mute svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  .mute:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+
+  .mute:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  /* Silenced is worth seeing without reading the icon closely. */
+  .volume.off .mute {
+    color: var(--text-faint);
+  }
+
+  .volume input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 50px;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--surface-strong);
+    cursor: pointer;
+  }
+
+  .volume input[type="range"]:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  .volume input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: none;
+    background: var(--text);
+    cursor: pointer;
+  }
+
+  .volume.off input[type="range"]::-webkit-slider-thumb {
+    background: var(--text-faint);
   }
 
   .mid {

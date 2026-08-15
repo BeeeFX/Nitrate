@@ -47,8 +47,8 @@ Free, and everything happens on your own computer.
 - **Or paste a link.** Copy a YouTube, X, Instagram, Reddit or Twitch address,
   press <kbd>Ctrl</kbd>+<kbd>V</kbd>, and it downloads the video and compresses
   it. There's no URL box to hunt for — the drop zone is the place things go.
-- **It hits the size you asked for.** Pick 10 MB and you get something around
-  9.7 MB, not an 11 MB file that Discord bounces back.
+- **It hits the size you asked for.** Pick 20 MB and you get something around
+  19.4 MB, not a 21 MB file that Discord bounces back.
 - **It keeps the picture watchable.** Rather than smearing a long 4K clip into an
   unwatchable 10 MB, it lowers the resolution and frame rate until there's
   genuinely enough detail left, and tells you what it did.

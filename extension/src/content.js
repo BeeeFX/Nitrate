@@ -22,6 +22,9 @@ const CHROME = "nav, header, aside, [role='navigation'], [role='banner']";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+/** Instagram's private messages, which need handling of their own. */
+const IG_DIRECT = /^\/direct\//;
+
 /**
  * The mark, built as elements rather than parsed from a string.
  *
@@ -141,6 +144,16 @@ const SITES = [
       { sel: '[data-a-target="clips-share-button"]', placement: "after" },
       { sel: '[data-target="clips-page__content"] [data-a-target="share-button"]', placement: "after" },
       { sel: '[data-a-target="share-button"]', placement: "after" },
+      // A VOD is not a clip page. None of the above exist there, and its Share
+      // button carries no `data-a-target` or `data-test-selector` at all — only
+      // its label and a hashed class — so this is the only thing left to aim
+      // at. The structural pass can't rescue it either: the row holds Share and
+      // an overflow menu and nothing else, which is short of the three icons it
+      // needs, so the button was going to the corner every time.
+      //
+      // Listed after the clip anchors so a clip page still matches its own
+      // first and this never changes where the button lands there.
+      { sel: 'button[aria-label="Share" i]', up: "row", placement: "penultimate" },
     ],
     resolve: () => location.href,
   },
@@ -193,6 +206,25 @@ const SITES = [
     // vertical rail down the right-hand side. When there's no article to scope
     // to, search the page and let the structural pass find that rail.
     scope: () => {
+      // A conversation is not a feed.
+      //
+      // A DM thread has no article either, so it fell through to `main` — and
+      // `main` in here holds two things shaped exactly like an action row: the
+      // header (call, video, info) and the composer (mic, photo, sticker).
+      // Both are rows of labelled icons inside buttons, which is the whole of
+      // what the structural pass looks for, so it furnished each of them with
+      // a button pointing at the conversation rather than at any video.
+      //
+      // The only thing in here worth sending is a clip someone shared, and
+      // that isn't one identifiable video until it's opened. Instagram opens
+      // it in a modal, so the modal is the entire scope — and only once it
+      // holds a video, which rules out the photo viewer and the many other
+      // dialogs (new message, emoji picker, settings) that are not media.
+      if (IG_DIRECT.test(location.pathname)) {
+        const viewer = document.querySelector('[role="dialog"]');
+        return viewer?.querySelector("video") ? [viewer] : [];
+      }
+
       const articles = Array.from(document.querySelectorAll("article"));
       if (articles.length) return articles;
       // A reel has no article, and searching the whole page finds the left
@@ -200,6 +232,15 @@ const SITES = [
       // labelled icons. `main` holds the reel and not the sidebar.
       return [document.querySelector("main") ?? document.body];
     },
+    /**
+     * No corner button in a conversation.
+     *
+     * The floating fallback sends whatever page it's on, and in a DM that's
+     * the thread — a URL Nitrate can do nothing with. Somewhere it can't be
+     * right is somewhere it shouldn't appear, so finding no action row in here
+     * means offering nothing rather than offering the page.
+     */
+    fallback: () => !IG_DIRECT.test(location.pathname),
     label: false,
     anchors: [],
     // Climbs from the rail rather than searching the scope, because on a reel
@@ -455,7 +496,21 @@ function findAnchor(root) {
     if (!match) continue;
 
     let node = match;
-    for (let step = 0; step < up && node; step += 1) node = node.parentElement;
+    if (up === "row") {
+      // Climb to the row rather than by a counted number of steps.
+      //
+      // These sites bury a control under a stack of single-child wrapper divs
+      // whose depth is an implementation detail — Twitch's Share button sits
+      // under four of them, and a hardcoded `up: 4` would be wrong the next
+      // time one is added or dropped. The first ancestor holding more than one
+      // child is the row itself, whatever the depth happens to be today.
+      for (let step = 0; step < 8 && node?.parentElement; step += 1) {
+        node = node.parentElement;
+        if (node.children.length > 1) break;
+      }
+    } else {
+      for (let step = 0; step < up && node; step += 1) node = node.parentElement;
+    }
     if (node) return { node, placement: placement ?? "append" };
   }
 
@@ -646,7 +701,22 @@ function scan() {
     if (button.closest?.(CHROME)) button.remove();
   }
 
-  for (const scope of scopes()) {
+  const roots = scopes();
+
+  // Buttons left behind by a page that's gone.
+  //
+  // A scope list that no longer holds a given button means the thing it was
+  // attached to isn't on screen any more — navigating from a reel into a DM
+  // empties the list entirely, and the loop below then runs zero times, so
+  // without this the reel's button rides along into the conversation. Skipped
+  // when the scope is the whole document, where it could only ever be a no-op.
+  if (!roots.includes(document)) {
+    for (const stray of document.querySelectorAll(`[${MARK}]:not(.nitrate-floating)`)) {
+      if (!roots.some((root) => root === stray || root.contains?.(stray))) stray.remove();
+    }
+  }
+
+  for (const scope of roots) {
     const root = scope === document ? document : scope;
     const anchor = findAnchor(root);
 
@@ -725,6 +795,14 @@ function refreshStyles(root) {
 function ensureFallback() {
   const hasInline = hasButton(document, `[${MARK}]:not(.nitrate-floating)`);
   const existing = document.querySelector(".nitrate-floating");
+
+  // Some pages have nowhere a corner button could be right — it sends whatever
+  // page it's on, so a page that isn't a video makes it an offer to compress
+  // nothing. See the Instagram entry.
+  if (site.fallback && !site.fallback()) {
+    existing?.remove();
+    return;
+  }
 
   if (hasInline) {
     existing?.remove();
