@@ -143,6 +143,106 @@ pub fn ensure_gallery(data_dir: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+// ---------------------------------------------------------------------------
+// QuickJS, so YouTube's player challenge can be answered
+// ---------------------------------------------------------------------------
+
+/// Pinned for the same reasons as gallery-dl above.
+const QUICKJS_VERSION: &str = "0.16.1";
+
+/// SHA-256 of the pinned Windows build.
+///
+/// Taken from the artifact itself, not from the project: quickjs-ng publishes
+/// no SHA256SUMS. So unlike gallery-dl's, this pins *this* build rather than
+/// independently vouching for it — it catches a corrupted or swapped download
+/// from here on, which is the part that matters for staying out of quarantine.
+const QUICKJS_SHA256_WINDOWS: &str =
+    "55a1b69cd4fdb6b0d3f8fdd910d0e89519f5330e408462084140c7b3b964fdae";
+
+fn quickjs_asset() -> &'static str {
+    if cfg!(windows) {
+        "qjs-windows-x86_64.exe"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "qjs-darwin-arm64"
+        } else {
+            "qjs-darwin-x86_64"
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        "qjs-linux-aarch64"
+    } else {
+        "qjs-linux-x86_64"
+    }
+}
+
+pub fn quickjs_path(data_dir: &Path) -> PathBuf {
+    let name = if cfg!(windows) { "qjs.exe" } else { "qjs" };
+    data_dir.join("bin").join(name)
+}
+
+/// Downloads QuickJS if it's missing. Returns the path either way.
+///
+/// yt-dlp has deprecated YouTube extraction without a JavaScript runtime.
+/// Without one it can only reach the few player clients that still hand out
+/// plain format URLs — and those are exactly the ones YouTube is switching off,
+/// which is what makes downloads fail. QuickJS is the small one: two megabytes
+/// against Deno's thirty-eight.
+pub fn ensure_quickjs(data_dir: &Path) -> Result<PathBuf, String> {
+    let target = quickjs_path(data_dir);
+    if target.is_file() {
+        return Ok(target);
+    }
+
+    let dir = target
+        .parent()
+        .ok_or("Couldn't work out where to put the JavaScript engine.")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
+
+    let url = format!(
+        "https://github.com/quickjs-ng/quickjs/releases/download/v{QUICKJS_VERSION}/{}",
+        quickjs_asset()
+    );
+
+    let bytes = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .user_agent("nitrate")
+        .build()
+        .map_err(|e| format!("Couldn't start the download: {e}"))?
+        .get(&url)
+        .send()
+        .map_err(|e| format!("Couldn't reach GitHub to fetch the JavaScript engine: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("GitHub refused the JavaScript engine request: {e}"))?
+        .bytes()
+        .map_err(|e| format!("The JavaScript engine transfer failed: {e}"))?;
+
+    if cfg!(windows) {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        if digest != QUICKJS_SHA256_WINDOWS {
+            return Err(format!(
+                "The JavaScript engine didn't match its published checksum \
+                 (expected {QUICKJS_SHA256_WINDOWS}, got {digest}). Nothing was installed."
+            ));
+        }
+    }
+
+    let temp = target.with_extension("part");
+    std::fs::write(&temp, &bytes)
+        .map_err(|e| format!("Couldn't save the JavaScript engine: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755));
+    }
+
+    std::fs::rename(&temp, &target)
+        .map_err(|e| format!("Couldn't install the JavaScript engine: {e}"))?;
+
+    Ok(target)
+}
+
 fn base_command(program: &Path) -> Command {
     let mut cmd = Command::new(program);
     #[cfg(windows)]
@@ -291,6 +391,62 @@ pub fn site_name(url: &str) -> String {
     pretty.to_string()
 }
 
+/// Points yt-dlp at the JavaScript engine we installed, if we managed to.
+///
+/// Named by path rather than by name: ours lives in the app's own folder, not
+/// on PATH, and only Deno is enabled without being asked for.
+pub fn runtime_args(quickjs: Option<&Path>) -> Vec<String> {
+    match quickjs {
+        Some(path) => vec![
+            "--js-runtimes".into(),
+            format!("quickjs:{}", path.display()),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// The extra arguments to try, in order, until a download sticks.
+///
+/// YouTube signs a format URL and then refuses it with a 403 something like
+/// half the time — measured over repeated attempts on one video, not inferred
+/// from a single failure. The signature is minted fresh on each extraction, so
+/// asking again is the whole fix; three goes turns a coin flip into a near
+/// certainty, and every one of them returns full quality.
+///
+/// Only once those are spent do we name `tv_simply`/`mweb`. Those need the
+/// JavaScript engine, and all they can offer is the 360p progressive stream —
+/// their better formats want a PO token we have no way to mint — so it's a
+/// last resort rather than a default. A small video beats no video, and this
+/// is a compressor: most of that resolution was going to be thrown away.
+///
+/// Retrying costs nothing when a link is genuinely broken: `worth_retrying`
+/// stops the ladder dead on anything that isn't a 403.
+pub fn attempts(url: &str, quickjs: Option<&Path>) -> Vec<Vec<String>> {
+    if site_name(url) != "YouTube" {
+        return vec![Vec::new()];
+    }
+
+    let mut ladder = vec![Vec::new(), Vec::new(), Vec::new()];
+    if quickjs.is_some() {
+        ladder.push(vec![
+            "--extractor-args".into(),
+            "youtube:player_client=tv_simply,mweb".into(),
+        ]);
+    }
+    ladder
+}
+
+/// Whether a failure is worth another go.
+///
+/// A 403 means the address went stale, not that the video is out of reach —
+/// the next attempt gets a freshly signed one. Anything else (private, removed,
+/// unsupported) gives the same answer however many times we ask, and retrying
+/// only makes the user wait longer to hear it.
+pub fn worth_retrying(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("403") || lower.contains("forbidden")
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UrlInfo {
@@ -357,8 +513,10 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
     pace();
 
     let mut child = base_command(bin)
+        // Warnings are left on deliberately. yt-dlp announces a missing
+        // JavaScript runtime as a warning, not an error, and silencing it hid
+        // the one line that explained a whole class of YouTube failures.
         .args([
-            "--no-warnings",
             "--no-playlist",
             "--dump-single-json",
             // A post made of photos has no video formats, and without this
@@ -485,7 +643,7 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
 }
 
 /// Turns yt-dlp's stderr into one line a person can act on.
-fn summarise_yt_dlp_error(stderr: &str) -> String {
+pub(crate) fn summarise_yt_dlp_error(stderr: &str) -> String {
     let line = stderr
         .lines()
         .find(|l| l.contains("ERROR:"))
@@ -500,6 +658,11 @@ fn summarise_yt_dlp_error(stderr: &str) -> String {
     // looks like a hang, with a raw HTTPError that explains nothing to anyone.
     if lower.contains("429") || lower.contains("too many requests") {
         "That site is asking us to slow down. Wait a minute and try again.".into()
+    } else if lower.contains("403") || lower.contains("forbidden") {
+        // Only reached once the retry ladder above has already given up, so
+        // "try again" is advice we've taken ourselves rather than passed on.
+        "That site turned the download away. Waiting a moment and trying again usually works."
+            .into()
     } else if lower.contains("not currently live") || lower.contains("live event will begin") {
         "That channel isn't live right now.".into()
     } else if lower.contains("live stream") && lower.contains("not available") {
@@ -557,7 +720,7 @@ pub fn fetch(
     );
 
     let mut child = base_command(bin)
-        .args(["--no-warnings", "--no-playlist", "--newline"])
+        .args(["--no-playlist", "--newline"])
         .args(["--socket-timeout", "20", "--retries", "3"])
         .args(["-f", &format])
         .args(["--merge-output-format", "mp4"])
@@ -695,5 +858,79 @@ fn find_downloaded(work_dir: &Path) -> Result<PathBuf, String> {
             Err("The download couldn't be assembled into a video — the audio and video parts were never merged.".into())
         }
         None => Err("The download finished but produced no file.".into()),
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_address_is_worth_asking_again() {
+        assert!(worth_retrying(
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        ));
+    }
+
+    #[test]
+    fn a_video_that_is_gone_is_not() {
+        // The distinction the ladder rests on: asking three more times would
+        // only make the user wait longer to hear the same thing.
+        assert!(!worth_retrying("ERROR: Video unavailable"));
+        assert!(!worth_retrying(
+            "ERROR: Private video. Sign in if you've been granted access"
+        ));
+        assert!(!worth_retrying(
+            "ERROR: Unsupported URL: https://example.com/x"
+        ));
+    }
+
+    #[test]
+    fn only_youtube_gets_a_second_chance() {
+        let other = attempts("https://www.reddit.com/r/x/comments/y/z/", None);
+        assert_eq!(other.len(), 1, "everywhere else keeps its single attempt");
+    }
+
+    #[test]
+    fn the_last_resort_needs_the_engine_that_makes_it_work() {
+        let url = "https://www.youtube.com/watch?v=ObXJSdfLfv4";
+        let engine = PathBuf::from("qjs.exe");
+
+        // Without QuickJS the fallback clients have nothing to offer, so the
+        // ladder stops at the plain retries rather than wasting a round trip.
+        assert_eq!(attempts(url, None).len(), 3);
+        assert!(attempts(url, None).iter().all(|a| a.is_empty()));
+
+        let with_engine = attempts(url, Some(&engine));
+        assert_eq!(with_engine.len(), 4);
+        assert_eq!(
+            with_engine[3],
+            vec![
+                "--extractor-args".to_string(),
+                "youtube:player_client=tv_simply,mweb".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_engine_is_named_by_path_not_by_hope() {
+        assert!(runtime_args(None).is_empty());
+
+        let args = runtime_args(Some(&PathBuf::from("C:\\nitrate\\qjs.exe")));
+        assert_eq!(args[0], "--js-runtimes");
+        // The drive letter's colon has to survive: yt-dlp splits the runtime
+        // name off at the first one only.
+        assert_eq!(args[1], "quickjs:C:\\nitrate\\qjs.exe");
+    }
+
+    #[test]
+    fn a_refusal_is_explained_rather_than_quoted() {
+        let said = summarise_yt_dlp_error(
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+        );
+        assert!(
+            said.contains("turned the download away"),
+            "raw HTTP status reached the user: {said}"
+        );
     }
 }

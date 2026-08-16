@@ -50,6 +50,28 @@ the tool on demand costs nothing.
 yt-dlp refuses DRM-protected content, and downloading from some sites is against
 their terms of service — that's between you and the site.
 
+## QuickJS — MIT
+
+YouTube requires a JavaScript engine to answer its player challenge, and yt-dlp
+has deprecated extraction without one. Nitrate fetches
+[quickjs-ng](https://github.com/quickjs-ng/quickjs) for the purpose — two
+megabytes against Deno's thirty-eight, which is the only reason it was chosen
+over yt-dlp's own recommendation.
+
+Like yt-dlp it is fetched into your app data folder rather than bundled, but
+unlike yt-dlp it is **pinned** to a version whose checksum is recorded in
+`src-tauri/src/download.rs`. It carries no obligations beyond keeping its notice.
+
+## gallery-dl — GPL v2
+
+Photo posts that yt-dlp cannot reach fall back to
+[gallery-dl](https://codeberg.org/mikf/gallery-dl). It is fetched on demand and
+pinned, exactly like QuickJS.
+
+It is GPL-licensed, but nothing here links against it: Nitrate runs it as a
+separate program, which is the arrangement the GPL is happy with. No combined
+work is distributed, because the binary is never shipped with Nitrate.
+
 ## Others
 
 | Component | License |

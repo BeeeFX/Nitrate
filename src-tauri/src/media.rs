@@ -567,11 +567,14 @@ pub fn to_gif(bins: &Binaries, input: &Path, width: u32) -> Result<PathBuf, Stri
 /// Everything in a post, in the order the post lists it.
 ///
 /// `gallery` is optional: without it, sites yt-dlp can't reach for stills
-/// simply come back with nothing rather than failing.
+/// simply come back with nothing rather than failing. `quickjs` is optional in
+/// the same spirit — without it YouTube loses its last-resort fallback, and
+/// every other site carries on exactly as before.
 #[allow(clippy::too_many_arguments)]
 pub fn fetch_post(
     yt: &Path,
     gallery: Option<&Path>,
+    quickjs: Option<&Path>,
     bins: &Binaries,
     url: &str,
     work_dir: &Path,
@@ -609,7 +612,8 @@ pub fn fetch_post(
                 items.push(MediaItem { path, kind });
             }
             Planned::Playable { index, gif } => {
-                let path = fetch_playable(yt, bins, url, work_dir, max_height, *index, done)?;
+                let path =
+                    fetch_playable(yt, quickjs, bins, url, work_dir, max_height, *index, done)?;
                 if *gif {
                     let width = 480;
                     let path = to_gif(bins, &path, width)?;
@@ -655,6 +659,7 @@ pub fn fetch_post(
 #[allow(clippy::too_many_arguments)]
 fn fetch_playable(
     yt: &Path,
+    quickjs: Option<&Path>,
     bins: &Binaries,
     url: &str,
     work_dir: &Path,
@@ -667,28 +672,45 @@ fn fetch_playable(
         h = max_height
     );
     let template = format!("{}/media-{slot}.%(ext)s", work_dir.display());
+    let runtime = crate::download::runtime_args(quickjs);
 
-    let output = base_command(yt)
-        .args(["--no-warnings", "--socket-timeout", "20", "--retries", "3"])
-        .args(["-f", &format])
-        .args(["--merge-output-format", "mp4"])
-        // One-based, and it's how yt-dlp addresses a single item of a post
-        // that holds several.
-        .args(["--playlist-items", &(index + 1).to_string()])
-        .args(["-o", &template])
-        .arg("--ffmpeg-location")
-        .arg(&bins.ffmpeg)
-        .arg(url)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("Couldn't start the downloader: {e}"))?;
+    // Each go is a fresh extraction, which is the point: `--retries` re-requests
+    // the same signed address, and a stale address returns the same 403 however
+    // often it's asked for.
+    let mut last = String::new();
+    for extra in crate::download::attempts(url, quickjs) {
+        let output = base_command(yt)
+            .args(["--socket-timeout", "20", "--retries", "3"])
+            .args(&runtime)
+            .args(&extra)
+            .args(["-f", &format])
+            .args(["--merge-output-format", "mp4"])
+            // One-based, and it's how yt-dlp addresses a single item of a post
+            // that holds several.
+            .args(["--playlist-items", &(index + 1).to_string()])
+            .args(["-o", &template])
+            .arg("--ffmpeg-location")
+            .arg(&bins.ffmpeg)
+            .arg(url)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("Couldn't start the downloader: {e}"))?;
 
-    if !output.status.success() {
-        return Err("That video couldn't be downloaded.".into());
+        if output.status.success() {
+            return newest_file(work_dir, &format!("media-{slot}"))
+                .ok_or_else(|| "The download finished but produced no file.".to_string());
+        }
+
+        last = String::from_utf8_lossy(&output.stderr).into_owned();
+        if !crate::download::worth_retrying(&last) {
+            break;
+        }
     }
 
-    newest_file(work_dir, &format!("media-{slot}"))
-        .ok_or_else(|| "The download finished but produced no file.".to_string())
+    // Said in yt-dlp's own words rather than as a flat "couldn't be
+    // downloaded", which sent people looking for a problem with the video when
+    // the answer was usually sitting in stderr.
+    Err(crate::download::summarise_yt_dlp_error(&last))
 }
 
 /// Falls back to gallery-dl, which reaches stills that yt-dlp doesn't.

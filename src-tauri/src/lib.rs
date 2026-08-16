@@ -743,9 +743,14 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
             // yt-dlp could see.
             let gallery = download::ensure_gallery(&data_dir).ok();
 
+            // Same again for QuickJS: it buys YouTube a fallback when the usual
+            // route is refused, and nothing else depends on it.
+            let quickjs = download::ensure_quickjs(&data_dir).ok();
+
             let fetched = media::fetch_post(
                 &bin,
                 gallery.as_deref(),
+                quickjs.as_deref(),
                 &state.bins,
                 &url,
                 &dir,

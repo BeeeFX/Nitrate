@@ -1,6 +1,6 @@
 # Privacy Policy
 
-_Last updated: 2 August 2026_
+_Last updated: 16 August 2026_
 
 This covers the **Nitrate** desktop application and the **Send to Nitrate**
 browser extension.
@@ -34,8 +34,12 @@ The application makes network requests in exactly three situations:
 1. **You paste or send a link.** It contacts that site to fetch the video you
    asked for, using [yt-dlp](https://github.com/yt-dlp/yt-dlp). Ordinary traffic
    with that site, no different from opening it in a browser.
-2. **Fetching the downloader.** yt-dlp is downloaded from its GitHub releases the
-   first time you use a link, and refreshed periodically.
+2. **Fetching the helper tools.** yt-dlp is downloaded from its GitHub releases
+   the first time you use a link, and refreshed periodically. Alongside it,
+   QuickJS is fetched from GitHub (YouTube will not serve a video without a
+   JavaScript engine to answer its player challenge) and gallery-dl from
+   Codeberg (for photo posts yt-dlp cannot reach). Each is downloaded once and
+   only when a link needs it.
 3. **Checking for updates.** The application asks GitHub whether a newer version
    exists. This request contains no identifier beyond what any HTTP request
    necessarily reveals to the server it contacts.
@@ -45,9 +49,10 @@ transmitted.
 
 ## Third parties
 
-GitHub serves the update check and the yt-dlp download, so GitHub sees those
-requests as it would any other download. Sites you send links to see a request
-for the video, as they would from a browser.
+GitHub serves the update check and the yt-dlp and QuickJS downloads, and
+Codeberg serves gallery-dl, so each sees those requests as it would any other
+download. Sites you send links to see a request for the video, as they would
+from a browser.
 
 ## Contact
 

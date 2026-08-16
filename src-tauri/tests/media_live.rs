@@ -13,10 +13,52 @@ fn yt_dlp() -> PathBuf {
     dirs_bin().join("yt-dlp.exe")
 }
 
+fn data_dir() -> PathBuf {
+    PathBuf::from(std::env::var("LOCALAPPDATA").unwrap()).join("app.nitrate.desktop")
+}
+
 fn dirs_bin() -> PathBuf {
-    PathBuf::from(std::env::var("LOCALAPPDATA").unwrap())
-        .join("app.nitrate.desktop")
-        .join("bin")
+    data_dir().join("bin")
+}
+
+/// The failure this was all written for.
+///
+/// YouTube signs a format URL and then refuses it about half the time, so a
+/// single attempt is a coin flip and a test of one attempt would pass by luck.
+/// What's being pinned here is the ladder: between retrying for a fresh
+/// signature and dropping to the progressive stream, *something* should arrive.
+#[test]
+#[ignore = "needs the network"]
+fn a_youtube_video_survives_a_refused_format_url() {
+    let dir = std::env::temp_dir().join("nitrate-live-yt");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let bins = ffmpeg::resolve();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let quickjs = download::ensure_quickjs(&data_dir()).expect("QuickJS should install");
+
+    let items = media::fetch_post(
+        &yt_dlp(),
+        None,
+        Some(&quickjs),
+        &bins,
+        "https://www.youtube.com/watch?v=ObXJSdfLfv4",
+        &dir,
+        1080,
+        &cancel,
+        |_| {},
+    )
+    .expect("fetching should not error")
+    .unwrap_or_else(|_| panic!("should not be cancelled"));
+
+    assert_eq!(items.len(), 1, "expected one video");
+    let size = std::fs::metadata(&items[0].path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!("got {:?} {size} bytes", items[0].path.file_name().unwrap());
+    assert!(size > 100_000, "expected a real video, got {size} bytes");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -30,6 +72,7 @@ fn an_instagram_carousel_comes_back_as_separate_items() {
 
     let items = media::fetch_post(
         &yt_dlp(),
+        None,
         None,
         &bins,
         "https://www.instagram.com/p/DbqvFwciSjr/",
@@ -101,6 +144,7 @@ fn an_x_gif_comes_back_as_a_real_gif() {
 
     let items = media::fetch_post(
         &yt_dlp(),
+        None,
         None,
         &bins,
         "https://x.com/BlazeBinges/status/2084677139195150496",
@@ -220,6 +264,7 @@ fn a_reddit_gallery_gives_up_every_image() {
     let items = media::fetch_post(
         &yt_dlp(),
         None,
+        None,
         &bins,
         "https://www.reddit.com/r/interesting/comments/1vjv949/i_have_this_optical_illusion_since_many_years_ago/",
         &dir,
@@ -264,6 +309,7 @@ fn a_reddit_gif_stays_a_gif() {
     // covers the two collapsing into one item rather than arriving twice.
     let items = media::fetch_post(
         &yt_dlp(),
+        None,
         None,
         &bins,
         "https://www.reddit.com/r/gifs/comments/1luldoo/showing_off_some_tricks/",
@@ -311,6 +357,7 @@ fn a_reddit_photo_post_comes_back_as_an_image() {
     // names the image address in the refusal it prints. No gallery-dl here.
     let items = media::fetch_post(
         &yt_dlp(),
+        None,
         None,
         &bins,
         "https://www.reddit.com/r/dijondijon/comments/1vipx0d/jane_remover_samples_talk_down/",
@@ -366,6 +413,7 @@ fn an_x_photo_post_comes_back_through_gallery_dl() {
     let items = media::fetch_post(
         &yt_dlp(),
         Some(&gallery),
+        None,
         &bins,
         "https://x.com/i/status/2085248162445373578",
         &dir,
