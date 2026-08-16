@@ -442,9 +442,19 @@ pub fn attempts(url: &str, quickjs: Option<&Path>) -> Vec<Vec<String>> {
 /// the next attempt gets a freshly signed one. Anything else (private, removed,
 /// unsupported) gives the same answer however many times we ask, and retrying
 /// only makes the user wait longer to hear it.
+///
+/// Only what yt-dlp called an error counts. It *warns* about a missing PO token
+/// by predicting the very status we're looking for — "they may yield HTTP Error
+/// 403" — so reading the whole of stderr would find a 403 in a run that never
+/// had one, and retry a video that was simply gone.
 pub fn worth_retrying(stderr: &str) -> bool {
-    let lower = stderr.to_lowercase();
-    lower.contains("403") || lower.contains("forbidden")
+    stderr
+        .lines()
+        .filter(|line| line.contains("ERROR:"))
+        .any(|line| {
+            let lower = line.to_lowercase();
+            lower.contains("403") || lower.contains("forbidden")
+        })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -883,6 +893,24 @@ mod retry_tests {
         assert!(!worth_retrying(
             "ERROR: Unsupported URL: https://example.com/x"
         ));
+    }
+
+    #[test]
+    fn a_warning_that_predicts_a_403_is_not_one() {
+        // yt-dlp's own words, from the fallback clients. Reading all of stderr
+        // rather than its error lines finds "403" here and retries a video
+        // that was never coming back.
+        let said = "WARNING: [youtube] abc: tv_simply client https formats require a GVS PO \
+                    Token which was not provided. They will be skipped as they may yield HTTP \
+                    Error 403.\nERROR: [youtube] abc: Video unavailable";
+        assert!(!worth_retrying(said));
+    }
+
+    #[test]
+    fn a_real_403_is_still_found_among_the_warnings() {
+        let said = "WARNING: [youtube] abc: formats may yield HTTP Error 403.\n\
+                    ERROR: unable to download video data: HTTP Error 403: Forbidden";
+        assert!(worth_retrying(said));
     }
 
     #[test]
