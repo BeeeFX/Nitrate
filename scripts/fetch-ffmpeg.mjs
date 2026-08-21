@@ -17,16 +17,17 @@ const outDir = join(root, "src-tauri", "binaries");
 
 // Pinned to a release line rather than `master-latest`, so a rebuild months
 // from now produces the same app.
-const FFMPEG_RELEASE = "n7.1";
+const FFMPEG_RELEASE = "n8.1";
+const FFMPEG_VERSION = FFMPEG_RELEASE.slice(1);
 
 const SOURCES = {
   "x86_64-pc-windows-msvc": {
-    url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_RELEASE}-latest-win64-gpl-7.1.zip`,
+    url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_RELEASE}-latest-win64-gpl-${FFMPEG_VERSION}.zip`,
     archive: "ffmpeg.zip",
     exe: ".exe",
   },
   "x86_64-unknown-linux-gnu": {
-    url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_RELEASE}-latest-linux64-gpl-7.1.tar.xz`,
+    url: `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_RELEASE}-latest-linux64-gpl-${FFMPEG_VERSION}.tar.xz`,
     archive: "ffmpeg.tar.xz",
     exe: "",
   },
