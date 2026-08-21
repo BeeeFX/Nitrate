@@ -285,7 +285,7 @@ class AppStore {
     await listen<{
       id: string;
       title: string;
-      items: { path: string; kind: MediaKind }[];
+      items: { path: string; kind: MediaKind; note: string | null }[];
     }>("job://fetched", ({ payload }) => {
       const origin = this.#find(payload.id);
       const at = this.jobs.findIndex((j) => j.id === payload.id);
@@ -314,6 +314,7 @@ class AppStore {
         groupId,
         groupTitle: payload.title,
         mediaKind: item.kind,
+        notes: item.note ? [item.note] : [],
         settings: origin?.settings ?? null,
       }));
 

@@ -23,10 +23,9 @@ fn dirs_bin() -> PathBuf {
 
 /// The failure this was all written for.
 ///
-/// YouTube signs a format URL and then refuses it about half the time, so a
-/// single attempt is a coin flip and a test of one attempt would pass by luck.
-/// What's being pinned here is the ladder: between retrying for a fresh
-/// signature and dropping to the progressive stream, *something* should arrive.
+/// YouTube changes which clients can fetch full-quality streams. What's pinned
+/// here is the ladder: between fresh signatures, the embedded client and the
+/// progressive fallback, *something* should arrive.
 #[test]
 #[ignore = "needs the network"]
 fn a_youtube_video_survives_a_refused_format_url() {
@@ -42,7 +41,9 @@ fn a_youtube_video_survives_a_refused_format_url() {
         None,
         Some(&quickjs),
         &bins,
-        "https://www.youtube.com/watch?v=ObXJSdfLfv4",
+        // This exact video repeatedly fell through to format 18 in v0.9.1 even
+        // though YouTube offers it at 2048x858.
+        "https://www.youtube.com/watch?v=eb8ipCfkIdE",
         &dir,
         1080,
         &cancel,
@@ -52,6 +53,16 @@ fn a_youtube_video_survives_a_refused_format_url() {
     .unwrap_or_else(|_| panic!("should not be cancelled"));
 
     assert_eq!(items.len(), 1, "expected one video");
+    assert_eq!(
+        items[0].note, None,
+        "full quality should not carry a warning"
+    );
+    let info = ffmpeg::probe(&bins, &items[0].path).expect("download should be playable");
+    assert!(
+        info.height > 360,
+        "the full-quality route regressed to {}p",
+        info.height
+    );
     let size = std::fs::metadata(&items[0].path)
         .map(|m| m.len())
         .unwrap_or(0);

@@ -66,6 +66,8 @@ impl MediaKind {
 pub struct MediaItem {
     pub path: PathBuf,
     pub kind: MediaKind,
+    /// Something important about how this item was fetched, shown on its card.
+    pub note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -568,8 +570,8 @@ pub fn to_gif(bins: &Binaries, input: &Path, width: u32) -> Result<PathBuf, Stri
 ///
 /// `gallery` is optional: without it, sites yt-dlp can't reach for stills
 /// simply come back with nothing rather than failing. `quickjs` is optional in
-/// the same spirit — without it YouTube loses its last-resort fallback, and
-/// every other site carries on exactly as before.
+/// the same spirit — without it YouTube loses its alternate full-quality route
+/// and its last-resort fallback, while every other site carries on as before.
 #[allow(clippy::too_many_arguments)]
 pub fn fetch_post(
     yt: &Path,
@@ -609,10 +611,14 @@ pub fn fetch_post(
                 // calling one a photo would hand back a still of its first
                 // frame. What it is comes from what arrived.
                 let kind = kind_from_extension(&path);
-                items.push(MediaItem { path, kind });
+                items.push(MediaItem {
+                    path,
+                    kind,
+                    note: None,
+                });
             }
             Planned::Playable { index, gif } => {
-                let path =
+                let (path, note) =
                     fetch_playable(yt, quickjs, bins, url, work_dir, max_height, *index, done)?;
                 if *gif {
                     let width = 480;
@@ -620,11 +626,13 @@ pub fn fetch_post(
                     items.push(MediaItem {
                         path,
                         kind: MediaKind::Gif,
+                        note,
                     });
                 } else {
                     items.push(MediaItem {
                         path,
                         kind: MediaKind::Video,
+                        note,
                     });
                 }
             }
@@ -666,7 +674,7 @@ fn fetch_playable(
     max_height: u32,
     index: usize,
     slot: usize,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Option<String>), String> {
     let format = format!(
         "bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
         h = max_height
@@ -678,11 +686,15 @@ fn fetch_playable(
     // the same signed address, and a stale address returns the same 403 however
     // often it's asked for.
     let mut last = String::new();
-    for extra in crate::download::attempts(url, quickjs) {
+    for attempt in crate::download::attempts(url, quickjs) {
+        let is_embedded_client = attempt
+            .args
+            .iter()
+            .any(|arg| arg.contains("player_client=web_embedded"));
         let output = base_command(yt)
             .args(["--socket-timeout", "20", "--retries", "3"])
             .args(&runtime)
-            .args(&extra)
+            .args(&attempt.args)
             .args(["-f", &format])
             .args(["--merge-output-format", "mp4"])
             // One-based, and it's how yt-dlp addresses a single item of a post
@@ -697,12 +709,20 @@ fn fetch_playable(
             .map_err(|e| format!("Couldn't start the downloader: {e}"))?;
 
         if output.status.success() {
-            return newest_file(work_dir, &format!("media-{slot}"))
-                .ok_or_else(|| "The download finished but produced no file.".to_string());
+            let path = newest_file(work_dir, &format!("media-{slot}"))
+                .ok_or_else(|| "The download finished but produced no file.".to_string())?;
+            let note = attempt.low_quality_fallback.then(|| {
+                "⚠ YouTube only made its 360p fallback available — this download may look soft."
+                    .to_string()
+            });
+            return Ok((path, note));
         }
 
         last = String::from_utf8_lossy(&output.stderr).into_owned();
-        if !crate::download::worth_retrying(&last) {
+        // A non-embeddable video can reject this client even though the final
+        // progressive fallback remains playable. That client-specific refusal
+        // must not cut the ladder short.
+        if !crate::download::worth_retrying(&last) && !is_embedded_client {
             break;
         }
     }
@@ -772,7 +792,11 @@ fn fetch_with_gallery(
         .into_iter()
         .map(|path| {
             let kind = kind_from_extension(&path);
-            MediaItem { path, kind }
+            MediaItem {
+                path,
+                kind,
+                note: None,
+            }
         })
         .collect())
 }

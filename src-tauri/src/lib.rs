@@ -102,6 +102,7 @@ struct CancelledEvent {
 struct FetchedItem {
     path: String,
     kind: media::MediaKind,
+    note: Option<String>,
 }
 
 /// A post that held more than one thing.
@@ -712,8 +713,8 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
     let from_url = matches!(source, JobSource::Url { .. });
     let mut work_dir: Option<PathBuf> = None;
 
-    let (input, name_hint) = match source {
-        JobSource::File(path) => (path, None),
+    let (input, name_hint, download_notes) = match source {
+        JobSource::File(path) => (path, None, Vec::new()),
         JobSource::Url { url, title } => {
             let data_dir = match app_data_dir(app) {
                 Ok(d) => d,
@@ -743,8 +744,8 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
             // yt-dlp could see.
             let gallery = download::ensure_gallery(&data_dir).ok();
 
-            // Same again for QuickJS: it buys YouTube a fallback when the usual
-            // route is refused, and nothing else depends on it.
+            // Same again for QuickJS: it buys YouTube alternate clients when
+            // the usual route is refused, and nothing else depends on it.
             let quickjs = download::ensure_quickjs(&data_dir).ok();
 
             let fetched = media::fetch_post(
@@ -771,6 +772,7 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
                             Ok(path) => placed.push(FetchedItem {
                                 path: path.to_string_lossy().into_owned(),
                                 kind: item.kind,
+                                note: item.note.clone(),
                             }),
                             Err(e) => {
                                 let _ = std::fs::remove_dir_all(&dir);
@@ -798,7 +800,8 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
             match fetched {
                 Ok(Ok(items)) => {
                     let item = items.into_iter().next().expect("one item");
-                    (item.path, Some(title))
+                    let notes = item.note.into_iter().collect();
+                    (item.path, Some(title), notes)
                 }
                 Ok(Err(_cancelled)) => {
                     let _ = std::fs::remove_dir_all(&dir);
@@ -869,6 +872,9 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
             "Downloaded. Compress it from the editor when you're ready.".into()
         };
 
+        let mut notes = download_notes;
+        notes.push(note);
+
         emit(1.0, "Done");
         let _ = app.emit(
             "job://done",
@@ -878,7 +884,7 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
                 final_bytes: bytes,
                 original_bytes: info.size_bytes,
                 attempts: 0,
-                notes: vec![note],
+                notes,
                 width: info.width,
                 height: info.height,
                 passed_through: true,
@@ -918,6 +924,8 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
 
     match result {
         Ok(Ok(outcome)) => {
+            let mut notes = download_notes;
+            notes.extend(outcome.plan.notes);
             let _ = app.emit(
                 "job://done",
                 DoneEvent {
@@ -926,7 +934,7 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
                     final_bytes: outcome.final_bytes,
                     original_bytes: info.size_bytes,
                     attempts: outcome.attempts,
-                    notes: outcome.plan.notes,
+                    notes,
                     width: outcome.plan.width,
                     height: outcome.plan.height,
                     passed_through: false,

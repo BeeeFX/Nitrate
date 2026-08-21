@@ -405,13 +405,22 @@ pub fn runtime_args(quickjs: Option<&Path>) -> Vec<String> {
     }
 }
 
+/// One way of asking YouTube for a download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadAttempt {
+    pub args: Vec<String>,
+    /// The last-resort clients currently expose only the progressive 360p
+    /// stream. Keep that escape hatch, but tell the caller what it accepted.
+    pub low_quality_fallback: bool,
+}
+
 /// The extra arguments to try, in order, until a download sticks.
 ///
-/// YouTube signs a format URL and then refuses it with a 403 something like
-/// half the time — measured over repeated attempts on one video, not inferred
-/// from a single failure. The signature is minted fresh on each extraction, so
-/// asking again is the whole fix; three goes turns a coin flip into a near
-/// certainty, and every one of them returns full quality.
+/// YouTube signs a format URL and can then refuse it with a 403. `web_embedded`
+/// goes first: unlike the default Android VR client it still
+/// exposes full-quality direct streams without a PO token for embeddable videos.
+/// Fresh default extractions still get a few chances after that because their
+/// failure can be transient, and they cover videos that forbid embedding.
 ///
 /// Only once those are spent do we name `tv_simply`/`mweb`. Those need the
 /// JavaScript engine, and all they can offer is the 360p progressive stream —
@@ -421,17 +430,37 @@ pub fn runtime_args(quickjs: Option<&Path>) -> Vec<String> {
 ///
 /// Retrying costs nothing when a link is genuinely broken: `worth_retrying`
 /// stops the ladder dead on anything that isn't a 403.
-pub fn attempts(url: &str, quickjs: Option<&Path>) -> Vec<Vec<String>> {
+pub fn attempts(url: &str, quickjs: Option<&Path>) -> Vec<DownloadAttempt> {
     if site_name(url) != "YouTube" {
-        return vec![Vec::new()];
+        return vec![DownloadAttempt {
+            args: Vec::new(),
+            low_quality_fallback: false,
+        }];
     }
 
-    let mut ladder = vec![Vec::new(), Vec::new(), Vec::new()];
+    let ordinary = || DownloadAttempt {
+        args: Vec::new(),
+        low_quality_fallback: false,
+    };
+    let mut ladder = Vec::new();
     if quickjs.is_some() {
-        ladder.push(vec![
-            "--extractor-args".into(),
-            "youtube:player_client=tv_simply,mweb".into(),
-        ]);
+        ladder.push(DownloadAttempt {
+            args: vec![
+                "--extractor-args".into(),
+                "youtube:player_client=web_embedded".into(),
+            ],
+            low_quality_fallback: false,
+        });
+    }
+    ladder.extend([ordinary(), ordinary(), ordinary()]);
+    if quickjs.is_some() {
+        ladder.push(DownloadAttempt {
+            args: vec![
+                "--extractor-args".into(),
+                "youtube:player_client=tv_simply,mweb".into(),
+            ],
+            low_quality_fallback: true,
+        });
     }
     ladder
 }
@@ -927,17 +956,27 @@ mod retry_tests {
         // Without QuickJS the fallback clients have nothing to offer, so the
         // ladder stops at the plain retries rather than wasting a round trip.
         assert_eq!(attempts(url, None).len(), 3);
-        assert!(attempts(url, None).iter().all(|a| a.is_empty()));
+        assert!(attempts(url, None).iter().all(|a| a.args.is_empty()));
 
         let with_engine = attempts(url, Some(&engine));
-        assert_eq!(with_engine.len(), 4);
+        assert_eq!(with_engine.len(), 5);
         assert_eq!(
-            with_engine[3],
+            with_engine[0].args,
+            vec![
+                "--extractor-args".to_string(),
+                "youtube:player_client=web_embedded".to_string(),
+            ]
+        );
+        assert!(!with_engine[0].low_quality_fallback);
+        assert!(with_engine[1..4].iter().all(|a| a.args.is_empty()));
+        assert_eq!(
+            with_engine[4].args,
             vec![
                 "--extractor-args".to_string(),
                 "youtube:player_client=tv_simply,mweb".to_string(),
             ]
         );
+        assert!(with_engine[4].low_quality_fallback);
     }
 
     #[test]
