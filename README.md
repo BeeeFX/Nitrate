@@ -161,20 +161,42 @@ Windows only at the moment.
 
 ## Browser extension
 
-A **Send to Nitrate** button, right on the page — on YouTube, X, Instagram,
-Reddit and Twitch — plus a right-click entry that works on any link anywhere.
+<div align="center">
 
-> ### ⏳ In review
->
-> The extension is with the **Chrome Web Store** and **Firefox Add-ons** at the
-> moment, waiting to be approved. **Install links will be posted here as soon as
-> they're through.**
->
-> Nothing else is needed — the app already understands everything the extension
-> sends, so it'll work the moment the extension lands.
+<img src="docs/store/icon-128.png" alt="The Send to Nitrate icon" width="88">
 
-It can't read the pages you visit and collects nothing at all; all it does is
-hand an address to the app. In the meantime, copying a link and pressing
+### Send to Nitrate
+
+**Skip the copying.** A **Send to Nitrate** button appears right on the page,
+and the video is downloading in the app before you've switched windows.
+
+[![Add to Chrome](https://img.shields.io/badge/Add_to-Chrome-5865F2?style=for-the-badge&logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/send-to-nitrate/dbgfekddkmmpflmmhgpdkgbildocgham)
+&nbsp;&nbsp;
+[![Add to Firefox](https://img.shields.io/badge/Add_to-Firefox-5865F2?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/firefox/addon/send-to-nitrate/)
+
+<sub>Edge, Brave and other Chromium browsers use the Chrome store.<br>
+Firefox for Android works too.</sub>
+
+</div>
+
+Three ways to send something, whichever suits the moment:
+
+| | |
+| --- | --- |
+| **A button on the page** | Sits alongside the share controls on YouTube, X, Instagram, Reddit and Twitch, styled to match each site so it doesn't look bolted on |
+| **Right-click any link** | **Send link to Nitrate** is in the menu, on any site, whether the button is there or not |
+| **The toolbar button** | Sends whatever page you're looking at |
+
+Nitrate opens with the video already on its way, and from there it's the app you
+already know — pick a size, or trim out the bit you wanted.
+
+It needs the desktop app above; on its own the extension does nothing. All it
+ever does is hand over an address, to a program on the same machine. It can't
+read the pages you visit, stores nothing and sends nothing anywhere — the
+policy is in [PRIVACY.md](PRIVACY.md), and every line it runs is in
+[`extension/`](extension).
+
+Rather not install anything? Copying a link and pressing
 <kbd>Ctrl</kbd>+<kbd>V</kbd> in Nitrate does the same job with one extra step.
 
 ## Questions
