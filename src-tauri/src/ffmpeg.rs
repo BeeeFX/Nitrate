@@ -142,14 +142,22 @@ struct ProbeStream {
     tags: ProbeTags,
 }
 
+// Read loosely: these only ever matter for a rotation, and a side-data or
+// tag shape nobody expected mustn't turn into a probe that fails outright.
 #[derive(Deserialize)]
 struct ProbeSideData {
-    rotation: Option<f64>,
+    rotation: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
 struct ProbeTags {
-    rotate: Option<String>,
+    rotate: Option<serde_json::Value>,
+}
+
+fn as_degrees(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
 }
 
 impl ProbeStream {
@@ -164,8 +172,8 @@ impl ProbeStream {
         let degrees = self
             .side_data_list
             .iter()
-            .find_map(|side| side.rotation)
-            .or_else(|| self.tags.rotate.as_deref()?.trim().parse().ok());
+            .find_map(|side| side.rotation.as_ref().and_then(as_degrees))
+            .or_else(|| self.tags.rotate.as_ref().and_then(as_degrees));
         degrees.is_some_and(|d: f64| (d.rem_euclid(180.0) - 90.0).abs() < 1.0)
     }
 }
