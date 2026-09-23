@@ -113,11 +113,32 @@ pub struct MediaInfo {
     /// Needed to budget correctly when the audio track is stream-copied.
     pub audio_bitrate_kbps: Option<u32>,
     pub size_bytes: u64,
+    /// The video's pixel format, e.g. `yuv420p` or `yuv420p10le`.
+    pub pix_fmt: Option<String>,
+    /// The video's transfer characteristic, which is what marks it as HDR.
+    pub color_transfer: Option<String>,
+    pub audio_channels: Option<u32>,
 }
 
 impl MediaInfo {
     pub fn has_audio(&self) -> bool {
         self.audio_codec.is_some()
+    }
+
+    /// PQ or HLG, the two ways a video says its brightness goes past SDR.
+    pub fn is_hdr(&self) -> bool {
+        matches!(
+            self.color_transfer.as_deref(),
+            Some("smpte2084" | "arib-std-b67")
+        )
+    }
+
+    /// 8-bit 4:2:0 — the one pixel format every browser and phone decodes.
+    pub fn is_plain_8bit(&self) -> bool {
+        matches!(
+            self.pix_fmt.as_deref(),
+            Some("yuv420p" | "yuvj420p" | "nv12")
+        )
     }
 }
 
@@ -137,6 +158,9 @@ struct ProbeStream {
     r_frame_rate: Option<String>,
     duration: Option<String>,
     bit_rate: Option<String>,
+    pix_fmt: Option<String>,
+    color_transfer: Option<String>,
+    channels: Option<u32>,
     #[serde(default)]
     side_data_list: Vec<ProbeSideData>,
     #[serde(default)]
@@ -153,6 +177,11 @@ struct ProbeSideData {
 #[derive(Deserialize, Default)]
 struct ProbeTags {
     rotate: Option<serde_json::Value>,
+    /// mkvmerge's per-track statistics, often the only bitrate an MKV has.
+    #[serde(rename = "BPS")]
+    bps: Option<serde_json::Value>,
+    #[serde(rename = "BPS-eng")]
+    bps_eng: Option<serde_json::Value>,
 }
 
 fn as_degrees(value: &serde_json::Value) -> Option<f64> {
@@ -274,12 +303,74 @@ pub fn probe(bins: &Binaries, input: &Path) -> Result<MediaInfo, String> {
         fps,
         video_codec: video.codec_name.clone().unwrap_or_else(|| "unknown".into()),
         audio_codec: audio.and_then(|a| a.codec_name.clone()),
-        audio_bitrate_kbps: audio
-            .and_then(|a| a.bit_rate.as_deref())
-            .and_then(|b| b.parse::<u64>().ok())
-            .map(|bps| (bps / 1000).max(1) as u32),
+        audio_bitrate_kbps: audio.and_then(stream_kbps),
         size_bytes,
+        pix_fmt: video.pix_fmt.clone(),
+        color_transfer: video.color_transfer.clone(),
+        audio_channels: audio.and_then(|a| a.channels),
     })
+}
+
+/// A stream's bitrate: its own field, or the statistics tag MKVs carry
+/// instead. WebM and many MKVs have neither — see `measure_audio_kbps`.
+fn stream_kbps(stream: &ProbeStream) -> Option<u32> {
+    let bps = stream
+        .bit_rate
+        .as_deref()
+        .and_then(|b| b.trim().parse::<u64>().ok())
+        .or_else(|| {
+            [&stream.tags.bps, &stream.tags.bps_eng]
+                .into_iter()
+                .flatten()
+                .find_map(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok()))
+        })?;
+    Some((bps / 1000).max(1) as u32)
+}
+
+/// Works out a copied audio track's bitrate by adding up its packets.
+///
+/// Copying spends whatever the source spent, so the budget needs the real
+/// number. WebM and most MKVs don't state one, and the fallback was the
+/// bitrate setting — which budgeted a 320k Opus track as 128k, overshot, and
+/// burned the retries finding out. Reading every packet header costs a pass
+/// over the file, so it's only done for a copy, and remembered.
+pub fn measure_audio_kbps(bins: &Binaries, input: &Path, duration: f64) -> Option<u32> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    /// Keyed by path and size, so a file replaced in place is measured again.
+    type Measured = Mutex<HashMap<(PathBuf, u64), Option<u32>>>;
+    static MEASURED: OnceLock<Measured> = OnceLock::new();
+    let size = std::fs::metadata(input).ok()?.len();
+    let key = (input.to_path_buf(), size);
+    let cache = MEASURED.get_or_init(Default::default);
+    if let Some(known) = cache.lock().unwrap().get(&key) {
+        return *known;
+    }
+
+    let output = base_command(&bins.ffprobe)
+        .args([
+            "-v",
+            "quiet",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "packet=size",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(input)
+        .output_contained()
+        .ok()?;
+    let bytes: u64 = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().trim_end_matches(',').parse::<u64>().ok())
+        .sum();
+    let kbps = (output.status.success() && bytes > 0 && duration > 0.0)
+        .then(|| ((bytes as f64 * 8.0 / 1000.0 / duration).ceil() as u32).max(1));
+
+    cache.lock().unwrap().insert(key, kbps);
+    kbps
 }
 
 /// Grabs a single frame partway through the video.

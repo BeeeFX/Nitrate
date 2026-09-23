@@ -1225,3 +1225,360 @@ fn reserved_windows_names_get_a_suffix() {
     assert_eq!(encode::safe_stem("Console"), "Console");
     assert_eq!(encode::safe_stem("COM1"), "COM1_");
 }
+
+/// Runs the bundled ffmpeg with arguments of the test's choosing.
+fn ffmpeg_make(dir: &Path, name: &str, args: &[&str]) -> PathBuf {
+    let out = dir.join(name);
+    let status = Command::new(ffmpeg::resolve().ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(args)
+        .arg(&out)
+        .status()
+        .expect("ffmpeg should run");
+    assert!(status.success(), "building {name} failed");
+    out
+}
+
+/// Encodes `input` with the suite's settings adjusted by `mutate`.
+fn encode_file(
+    input: &Path,
+    edits: Edits,
+    mutate: impl FnOnce(&mut Settings),
+) -> Result<encode::EncodeOutcome, String> {
+    let bins = ffmpeg::resolve();
+    let mut info = ffmpeg::probe(&bins, input).expect("probe should succeed");
+    let mut set = settings(3_000_000, input.parent().unwrap());
+    mutate(&mut set);
+    encode::measure_copied_audio(&bins, input, &mut info, &set);
+    let task = encode::Task {
+        input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .map(|r| r.unwrap_or_else(|_| panic!("not cancelled")))
+}
+
+const TEST_PICTURE: [&str; 4] = [
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc2=size=640x360:rate=24:duration=2",
+];
+
+#[test]
+fn a_small_file_discord_cant_play_is_still_encoded() {
+    let dir = temp_dir("inline");
+    let bins = ffmpeg::resolve();
+    let set = settings(10_000_000, &dir);
+
+    // An iPhone's HEVC .mov, well under the limit.
+    let hevc = ffmpeg_make(
+        &dir,
+        "phone.mov",
+        &[
+            &TEST_PICTURE[..],
+            &["-c:v", "libx265", "-x265-params", "log-level=error"],
+        ]
+        .concat(),
+    );
+    let info = ffmpeg::probe(&bins, &hevc).unwrap();
+    assert!(
+        !encode::can_pass_through(&info, &set, &Edits::default(), &hevc),
+        "HEVC plays as a download link on most Discord clients"
+    );
+
+    // 10-bit H.264 in an MP4: the right codec, a profile browsers won't decode.
+    let ten_bit = ffmpeg_make(
+        &dir,
+        "ten.mp4",
+        &[
+            &TEST_PICTURE[..],
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p10le"],
+        ]
+        .concat(),
+    );
+    let info = ffmpeg::probe(&bins, &ten_bit).unwrap();
+    assert!(!encode::can_pass_through(
+        &info,
+        &set,
+        &Edits::default(),
+        &ten_bit
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hdr_is_tone_mapped_down_to_sdr() {
+    let dir = temp_dir("hdr");
+    let bins = ffmpeg::resolve();
+    let hlg = ffmpeg_make(
+        &dir,
+        "hlg.mp4",
+        &[
+            &TEST_PICTURE[..],
+            &[
+                "-vf",
+                "format=yuv420p10le",
+                "-c:v",
+                "libx265",
+                // In the bitstream, where a camera puts it: the MP4 muxer
+                // drops a transfer set only as an output option.
+                "-x265-params",
+                "log-level=error:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+            ],
+        ]
+        .concat(),
+    );
+    assert!(ffmpeg::probe(&bins, &hlg).unwrap().is_hdr());
+
+    let outcome = encode_file(&hlg, Edits::default(), |_| {}).expect("should encode");
+    let out = ffmpeg::probe(&bins, &outcome.output).unwrap();
+    assert_eq!(out.pix_fmt.as_deref(), Some("yuv420p"));
+    assert_eq!(
+        out.color_transfer.as_deref(),
+        Some("bt709"),
+        "left labelled as HLG, it plays back washed out"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_codec_comes_out_eight_bit_four_two_zero() {
+    // A 4:4:4 screen capture. H.264 and H.265 were already converted; VP9
+    // wasn't, and wrote a profile 1 file most players refuse.
+    let dir = temp_dir("444");
+    let source = ffmpeg_make(
+        &dir,
+        "capture.mp4",
+        &[
+            &TEST_PICTURE[..],
+            &["-c:v", "libx264", "-pix_fmt", "yuv444p"],
+        ]
+        .concat(),
+    );
+    let outcome = encode_file(&source, Edits::default(), |s| {
+        s.video_codec = VideoCodec::Vp9;
+        s.container = Container::Webm;
+        s.audio_codec = AudioCodec::Opus;
+        s.two_pass = false;
+        s.preset = "5".into();
+    })
+    .expect("should encode");
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!(out.pix_fmt.as_deref(), Some("yuv420p"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn surround_sound_becomes_stereo_opus() {
+    let dir = temp_dir("surround");
+    let source = ffmpeg_make(
+        &dir,
+        "film.mkv",
+        &[
+            &TEST_PICTURE[..],
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=5.1(side):sample_rate=48000",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "ac3",
+            ],
+        ]
+        .concat(),
+    );
+    let outcome = encode_file(&source, Edits::default(), |s| {
+        s.video_codec = VideoCodec::Vp9;
+        s.container = Container::Webm;
+        s.audio_codec = AudioCodec::Opus;
+        s.two_pass = false;
+        s.preset = "5".into();
+    })
+    .expect("libopus used to refuse 5.1(side) outright");
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!(out.audio_channels, Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn copying_aac_into_webm_converts_it_instead() {
+    let dir = temp_dir("aac-webm");
+    let source = make_clip(&dir, "input.mp4", "640x360", 24, 2, 800);
+    let outcome = encode_file(&source, Edits::default(), |s| {
+        s.video_codec = VideoCodec::Vp9;
+        s.container = Container::Webm;
+        s.audio_codec = AudioCodec::Copy;
+        s.two_pass = false;
+        s.preset = "5".into();
+    })
+    .expect("WebM can't hold AAC, and asking it to failed the encode");
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!(out.audio_codec.as_deref(), Some("opus"));
+    assert!(
+        outcome
+            .plan
+            .notes
+            .iter()
+            .any(|n| n.contains("re-encoded as Opus")),
+        "should say so: {:?}",
+        outcome.plan.notes
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn copied_audio_is_budgeted_at_what_it_really_is() {
+    // WebM states no bitrate for its streams, and the fallback was the
+    // setting — 128k — whatever the track really spent.
+    let dir = temp_dir("measure");
+    let bins = ffmpeg::resolve();
+    let source = ffmpeg_make(
+        &dir,
+        "loud.webm",
+        &[
+            &TEST_PICTURE[..],
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "anoisesrc=d=2:c=pink",
+                "-ac",
+                "2",
+                "-c:v",
+                "libvpx-vp9",
+                "-deadline",
+                "realtime",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "320k",
+            ],
+        ]
+        .concat(),
+    );
+    let mut info = ffmpeg::probe(&bins, &source).unwrap();
+    assert_eq!(info.audio_bitrate_kbps, None, "WebM shouldn't state one");
+
+    let mut set = settings(3_000_000, &dir);
+    set.audio_codec = AudioCodec::Copy;
+    encode::measure_copied_audio(&bins, &source, &mut info, &set);
+    let kbps = info.audio_bitrate_kbps.expect("should be measured");
+    assert!((200..=400).contains(&kbps), "measured {kbps} kbps");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn keep_mode_trims_past_tracks_an_mp4_cant_hold() {
+    let dir = temp_dir("keep-tracks");
+    let srt = dir.join("subs.srt");
+    std::fs::write(&srt, "1\n00:00:00,000 --> 00:00:01,500\nHello\n").unwrap();
+    // Subtitles, and PCM audio the way cameras record it.
+    let source = ffmpeg_make(
+        &dir,
+        "camera.mkv",
+        &[
+            &TEST_PICTURE[..],
+            &["-f", "lavfi", "-i", "sine=duration=2", "-i"],
+            &[srt.to_str().unwrap()],
+            &[
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-map",
+                "2",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "pcm_s16le",
+                "-c:s",
+                "srt",
+            ],
+        ]
+        .concat(),
+    );
+    let trim = Edits {
+        start: Some(0.5),
+        ..Edits::default()
+    };
+    let outcome = encode_file(&source, trim, |s| s.mode = TargetMode::Keep)
+        .expect("`-map 0` took the subtitles along and the copy failed");
+    assert!(
+        outcome.plan.copy_streams,
+        "the video should still be copied"
+    );
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!(out.audio_codec.as_deref(), Some("aac"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_source_odd_in_both_directions_encodes() {
+    let dir = temp_dir("odd");
+    let source = ffmpeg_make(
+        &dir,
+        "odd.mkv",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=853x481:rate=24:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv444p",
+        ],
+    );
+    let outcome = encode_file(&source, Edits::default(), |_| {})
+        .expect("scale=-2:481 is a height x264 refuses");
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!((out.width % 2, out.height % 2), (0, 0));
+    assert_eq!(
+        (out.width, out.height),
+        (outcome.plan.width, outcome.plan.height)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_gpu_encoder_that_fails_hands_over_to_software() {
+    // No GPU here, so NVENC fails the moment it starts — exactly what a
+    // driver reset mid-encode looks like from this side.
+    let dir = temp_dir("gpu-fallback");
+    let input = make_clip(&dir, "input.mp4", "640x360", 24, 2, 800);
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).unwrap();
+    let set = settings(1_000_000, &dir);
+    let mut plan = encode::plan(&info, &set, &Edits::default(), &bins).unwrap();
+    plan.encoder = "h264_nvenc".into();
+
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let outcome = encode::run_planned(&bins, &task, plan, &cancel, |_, _| {})
+        .expect("should finish in software rather than fail")
+        .unwrap_or_else(|_| panic!("not cancelled"));
+    assert_eq!(outcome.plan.encoder, "libx264");
+    assert!(outcome.final_bytes <= 1_000_000);
+    assert!(outcome
+        .plan
+        .notes
+        .iter()
+        .any(|n| n.contains("finished in software")));
+    let _ = std::fs::remove_dir_all(&dir);
+}

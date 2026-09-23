@@ -212,7 +212,8 @@ async fn preview_plan(
     let bins = state.bins.clone();
     blocking(move || {
         let input = PathBuf::from(&path);
-        let info = ffmpeg::probe(&bins, &input)?;
+        let mut info = ffmpeg::probe(&bins, &input)?;
+        encode::measure_copied_audio(&bins, &input, &mut info, &settings);
         encode::plan(&info, &settings, &edits.unwrap_or_default(), &bins)
     })
     .await
@@ -889,7 +890,7 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
         }
     };
 
-    let info = match ffmpeg::probe(&state.bins, &input) {
+    let mut info = match ffmpeg::probe(&state.bins, &input) {
         Ok(i) => i,
         Err(e) => {
             cleanup(&work_dir);
@@ -898,6 +899,8 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
             return;
         }
     };
+
+    encode::measure_copied_audio(&state.bins, &input, &mut info, &settings);
 
     // The last chance before a file is placed without encoding — a download
     // held back for trimming, or one that already fits — to notice a cancel.
