@@ -224,9 +224,22 @@ No, this add-on does not require data collection
 Mozilla now requires every add-on to say so explicitly, and an upload without
 the declaration fails validation with *"The `data_collection_permissions`
 property is missing"*. Ours declares `{ "required": ["none"] }`, which is the
-formal way of saying it collects nothing at all. Note that this key only exists
-from Firefox 140, which is why the add-on's minimum version is 140 (142 on
-Android) rather than something older.
+formal way of saying it collects nothing at all. The key exists from Firefox
+140, and from 142 on Android.
+
+**Compatibility** — Firefox only. Leave **Firefox for Android** unticked, and
+untick it if a previous version had it. The extension hands links to a desktop
+application that can't run on a phone, so there it could only ever fail, and
+Android's Firefox has no right-click menus for it to add to either. The
+manifest has no `gecko_android` section for the same reason.
+
+That's also why the minimum version is 142 rather than 140. The linter can't be
+told an add-on isn't for Android — it checks every manifest against Firefox for
+Android regardless, using the desktop minimum when there's no Android one — so
+at 140 it warns that Android 140 predates `data_collection_permissions`. With
+only the one minimum to go on, raising it to 142 clears the warning, at the
+cost of Firefox 140 and 141 on the desktop: in practice, the tail end of ESR
+140.
 
 **Name**
 

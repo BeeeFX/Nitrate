@@ -12,6 +12,7 @@ const MENU_PAGE = "nitrate-send-page";
 const MENU_VIDEO = "nitrate-send-video";
 
 chrome.runtime.onInstalled.addListener(() => {
+  if (!chrome.contextMenus) return;
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: MENU_LINK,
@@ -31,7 +32,12 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+// Optional on purpose. Firefox for Android has no context menus at all, and
+// an unguarded call here threw before the toolbar listener below was ever
+// registered — so one missing API took the whole extension down with it. The
+// extension no longer offers itself on Android, but a browser without menus
+// should still get a working toolbar button.
+chrome.contextMenus?.onClicked.addListener(async (info, tab) => {
   // A streamed video's source is a `blob:` address that only means something
   // inside that tab — which is every video on the five supported sites — so
   // it counts as no source at all, and the page (or the embed it sits in)

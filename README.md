@@ -176,8 +176,7 @@ and the video is downloading in the app before you've switched windows.
 &nbsp;&nbsp;
 [![Add to Firefox](https://img.shields.io/badge/Add_to-Firefox-5865F2?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/firefox/addon/send-to-nitrate/)
 
-<sub>Edge, Brave and other Chromium browsers use the Chrome store.<br>
-Firefox for Android works too.</sub>
+<sub>Edge, Brave and other Chromium browsers use the Chrome store.</sub>
 
 </div>
 
