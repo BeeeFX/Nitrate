@@ -13,3 +13,6 @@
 *.jpg binary
 *.mp4 binary
 *.exe binary
+
+# Signed bytes: any conversion at all breaks the signature they carry.
+src-tauri/tests/fixtures/** -text
