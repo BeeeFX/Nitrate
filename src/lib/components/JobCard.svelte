@@ -10,6 +10,7 @@
   } from "../format";
   import { app, etaFor } from "../state.svelte";
   import { hasEdits, type Job } from "../types";
+  import SectionPicker from "./SectionPicker.svelte";
 
   interface Props {
     job: Job;
@@ -300,7 +301,11 @@
         <button
           class="act go"
           onclick={() => app.start(job.id)}
-          title={job.heldReason === "long" ? "Compress it anyway" : "Compress"}
+          title={job.heldReason === "long"
+            ? job.kind === "url" && !job.path
+              ? "Download all of it"
+              : "Compress it anyway"
+            : "Compress"}
         >
           <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor" /></svg>
         </button>
@@ -408,6 +413,9 @@
         start, or turn it on in settings.
       </span>
     </p>
+  {:else if waiting && job.heldReason === "long" && job.kind === "url" && !job.path}
+    <!-- Not downloaded yet, so there's still a choice about how much to fetch. -->
+    <SectionPicker {job} />
   {:else if waiting && job.heldReason === "long"}
     <p class="hold">
       <svg viewBox="0 0 24 24" aria-hidden="true"

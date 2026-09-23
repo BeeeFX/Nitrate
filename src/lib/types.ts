@@ -142,6 +142,11 @@ export interface Job {
    */
   heldReason: "long" | "browser" | "manual" | null;
   /**
+   * For a link: only this stretch of it, in seconds, when a part was chosen
+   * instead of the whole thing.
+   */
+  section: { start: number; end: number } | null;
+  /**
    * Per-video overrides set in the editor. Null means "whatever the main
    * interface says", so changing the target there still moves everything that
    * hasn't been given its own answer.

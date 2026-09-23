@@ -108,7 +108,9 @@ it's usually not what you meant — normally you wanted one moment out of it. So
 says so, and offers you three ways on: trim a section, switch to **No limit**, or
 go ahead anyway.
 
-Pasted links still download as normal. It's only the compressing that waits, so
+A long pasted link waits before it downloads, so you can fetch just the part
+you want — it starts from the moment the link was shared at, if it has one —
+rather than an hour of stream to throw most of away. Or download all of it, and
 you arrive in the editor with the video already there.
 
 </td>

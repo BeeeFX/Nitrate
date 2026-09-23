@@ -472,6 +472,7 @@ class AppStore {
       knownDuration: null,
       settings: null,
       heldReason: null,
+      section: null,
       groupId: null,
       groupTitle: null,
       mediaKind: null,
@@ -488,7 +489,11 @@ class AppStore {
    */
   #shouldHoldBack(job: Job): boolean {
     if (this.settingsFor(job).mode !== "size") return false;
-    return (job.knownDuration ?? 0) > LONG_VIDEO_SECONDS;
+    // A part chosen from a long link is judged by the part.
+    const length = job.section
+      ? job.section.end - job.section.start
+      : (job.knownDuration ?? 0);
+    return length > LONG_VIDEO_SECONDS;
   }
 
   /** Drains links that arrived from a browser via `nitrate://`. */
@@ -526,10 +531,17 @@ class AppStore {
       job.knownDuration = info.duration;
       job.stage = "Ready";
 
-      // Long recordings download as normal — `start` sees the duration and
-      // stops before compressing, leaving a file ready to trim.
+      // A long recording waits before downloading, not after. Most of a
+      // two-hour stream is usually not what anyone wanted, and fetching all of
+      // it to trim it down costs gigabytes and minutes; the card offers the
+      // part instead, or all of it as before. That goes for links from the
+      // browser too, which wait for a click anyway.
       const auto = opts?.autoStart ?? this.autoStart;
-      if (auto) {
+      if (this.#shouldHoldBack(job)) {
+        job.status = "held";
+        job.heldReason = "long";
+        job.stage = "Waiting for you";
+      } else if (auto) {
         await this.start(id);
       } else {
         job.status = "held";
@@ -692,11 +704,21 @@ class AppStore {
         title: job.name,
         settings,
         edits: $state.snapshot(job.edits),
+        // Only until it's fetched: after that the file is the part.
+        section: job.kind === "url" && !job.path ? $state.snapshot(job.section) : null,
       });
     } catch (err) {
       job.status = "failed";
       job.error = String(err);
     }
+  }
+
+  /** Downloads only this stretch of a link, in seconds. */
+  async startPart(id: string, start: number, end: number) {
+    const job = this.#find(id);
+    if (!job || job.kind !== "url" || !(end > start)) return;
+    job.section = { start, end };
+    await this.start(id);
   }
 
   async cancel(id: string) {
