@@ -210,8 +210,14 @@ fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
 
     crate::download::pace();
 
-    let mut cmd = base_command(yt);
+    let mut cmd = crate::download::yt_dlp_command(yt);
     cmd.args([
+        // A video opened from a playlist or a Mix carries `&list=` in its
+        // address, and without this the whole list is planned — one job per
+        // entry, or a timeout on a long one. It only narrows an address that
+        // names one item *and* the list around it, so a carousel or a
+        // multi-video post still comes back whole.
+        "--no-playlist",
         "--dump-json",
         // Instagram photo posts have no video formats at all, and without
         // this yt-dlp treats that as fatal and prints nothing usable.
@@ -691,7 +697,10 @@ fn fetch_playable(
             .args
             .iter()
             .any(|arg| arg.contains("player_client=web_embedded"));
-        let output = base_command(yt)
+        let output = crate::download::yt_dlp_command(yt)
+            // As in the plan: item N of `watch?v=X&list=Y` is otherwise the
+            // list's Nth entry, not X.
+            .arg("--no-playlist")
             .args(["--socket-timeout", "20", "--retries", "3"])
             .args(&runtime)
             .args(&attempt.args)
@@ -741,6 +750,9 @@ fn fetch_with_gallery(
     cancel: &Arc<AtomicBool>,
 ) -> Result<Vec<MediaItem>, String> {
     let output = base_command(gallery)
+        // For the same reason yt-dlp ignores its own: a user's settings could
+        // rename, redirect or skip what lands in the work folder.
+        .arg("--config-ignore")
         .args(["--dest", &work_dir.to_string_lossy()])
         .args(["--no-mtime", "--quiet"])
         .arg(url)

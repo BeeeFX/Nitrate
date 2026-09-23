@@ -208,6 +208,18 @@ async fn start_job(
     settings: Settings,
     edits: Option<Edits>,
 ) -> Result<(), String> {
+    // The id becomes part of a temp folder that's deleted wholesale when a
+    // download fails, so it's held to the shape the frontend actually mints.
+    // `job-1\..\..\Documents` would otherwise name a folder nobody meant.
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("That job id isn't one Nitrate made.".into());
+    }
+
     let source = match (path, url) {
         (Some(p), _) => JobSource::File(PathBuf::from(p)),
         (None, Some(u)) => JobSource::Url {

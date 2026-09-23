@@ -250,6 +250,19 @@ fn base_command(program: &Path) -> Command {
     cmd
 }
 
+/// yt-dlp, deaf to whatever configuration the user already has.
+///
+/// yt-dlp reads `%APPDATA%\yt-dlp\config` and `~/yt-dlp.conf` on its own, and
+/// the people most likely to have one are the people who already use it. `-x`
+/// in there turned every download into an audio file ffprobe then rejected,
+/// and `--download-archive` skipped anything fetched before — exiting cleanly
+/// with no file, and filing Nitrate's downloads in their archive besides.
+pub(crate) fn yt_dlp_command(bin: &Path) -> Command {
+    let mut cmd = base_command(bin);
+    cmd.arg("--ignore-config");
+    cmd
+}
+
 // ---------------------------------------------------------------------------
 // Getting hold of yt-dlp
 // ---------------------------------------------------------------------------
@@ -340,7 +353,7 @@ pub fn refresh_if_stale(data_dir: &Path) {
         return;
     }
 
-    let ok = base_command(&bin)
+    let ok = yt_dlp_command(&bin)
         .arg("--update")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -551,7 +564,7 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
 
     pace();
 
-    let mut child = base_command(bin)
+    let mut child = yt_dlp_command(bin)
         // Warnings are left on deliberately. yt-dlp announces a missing
         // JavaScript runtime as a warning, not an error, and silencing it hid
         // the one line that explained a whole class of YouTube failures.
@@ -758,7 +771,7 @@ pub fn fetch(
         h = max_height
     );
 
-    let mut child = base_command(bin)
+    let mut child = yt_dlp_command(bin)
         .args(["--no-playlist", "--newline"])
         .args(["--socket-timeout", "20", "--retries", "3"])
         .args(["-f", &format])
