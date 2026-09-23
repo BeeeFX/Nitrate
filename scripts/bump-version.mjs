@@ -1,4 +1,4 @@
-// Bumps the version in the three places that have to agree, then tags.
+// Bumps the version everywhere it has to agree.
 //
 // The updater compares the running app's version against latest.json, so a
 // release where these drift either never offers the update or offers it forever.
@@ -40,6 +40,16 @@ await patch("package.json", (s) =>
 await patch("src-tauri/tauri.conf.json", (s) =>
   s.replace(/"version":\s*"[^"]+"/, `"version": "${version}"`),
 );
+
+// The lockfile repeats the package's own version, at the top and again under
+// `packages[""]`, and npm leaves both stale until the next install — this one
+// still said 0.4.0 at 0.9.3. Rewritten as JSON, which is how npm writes it.
+await patch("package-lock.json", (s) => {
+  const lock = JSON.parse(s);
+  lock.version = version;
+  if (lock.packages?.[""]) lock.packages[""].version = version;
+  return `${JSON.stringify(lock, null, 2)}\n`;
+});
 
 // Anchored to [package] so a dependency's version can't be hit by accident.
 await patch("src-tauri/Cargo.toml", (s) =>

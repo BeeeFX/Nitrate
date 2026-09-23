@@ -43,6 +43,11 @@ jobs:
       - name: Build frontend
         run: npx vite build
 
+      # Runs the content script against stub pages of all five sites. It was
+      # only ever run by hand before packaging.
+      - name: Extension checks
+        run: npm run extension:check
+
       - name: Rustfmt
         working-directory: src-tauri
         run: cargo fmt --check
