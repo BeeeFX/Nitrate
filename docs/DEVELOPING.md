@@ -15,7 +15,9 @@ npm run app
 ```
 
 `npm install` also downloads the ffmpeg and ffprobe sidecars (~260 MB) into
-`src-tauri/binaries/`. They're deliberately kept out of git.
+`src-tauri/binaries/`. They're deliberately kept out of git. The Windows and
+Linux builds are one named BtbN month-end build, checked against its SHA-256;
+`scripts/fetch-ffmpeg.mjs` says how to move the pin.
 
 | Command | What it does |
 | --- | --- |
@@ -39,7 +41,10 @@ src/                    Svelte 5 frontend
 src-tauri/src/
   encode.rs             Bitrate planning, downscale ladder, two-pass, retry
   ffmpeg.rs             Binary discovery, ffprobe parsing, progress streaming
-  download.rs           yt-dlp fetching and link probing
+  download.rs           yt-dlp fetching, verification and link probing
+  media.rs              Everything in a post: plan, fetch, cancel, progress
+  signature.rs          Checks yt-dlp's release signature against a pinned key
+  children.rs           Ties helper processes to the app and to their job
   deeplink.rs           nitrate:// parsing and validation
   tray.rs               Tray icon and popup positioning
   lib.rs                Commands, worker pool, events
@@ -54,7 +59,15 @@ left over from a different codec gets sanitised instead of reaching ffmpeg.
 
 `scripts/check-extension.mjs` runs the extension's content script against a stub
 DOM, because the browsers' own selectors rot and a parse check catches none of
-it. It covers all five sites, a reel feed with two rails, and a Twitch clip row.
+it. It covers all five sites, a reel feed with two rails, a Twitch clip row, a
+page that never stops changing, the button's sent / answered / unanswered
+states, and the background script's toolbar and menu paths. CI runs it.
+
+yt-dlp is never run until the checksums it's installed against carry the
+maintainers' signature, made with the key pinned in `download.rs`. If yt-dlp
+ever signs with a new key, links stop working until a release pins it — see the
+comment there. `tests/signature_test.rs` checks the verifier against a real
+release kept in `tests/fixtures/`.
 
 ## How it hits an exact size
 
@@ -163,4 +176,7 @@ npx addons-linter extension/dist/nitrate-extension-firefox-*.zip
 Zero errors and zero warnings is the bar, and it's currently met. Two things in
 the manifest exist purely to satisfy it: `data_collection_permissions` set to
 `["none"]`, which Mozilla now requires of every add-on, and a minimum Firefox
-version of 140 (142 on Android), because that key doesn't exist before then.
+version of 142. The key arrived in 140 on desktop but 142 on Android, and with
+no Android entry in the manifest the linter checks Android against the desktop
+minimum — so 142 is the lowest that passes. The extension isn't offered on
+Android at all: there's no desktop app there for it to hand links to.
