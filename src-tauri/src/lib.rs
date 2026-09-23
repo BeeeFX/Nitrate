@@ -130,6 +130,22 @@ pub struct FileInfo {
     thumbnail: Option<String>,
 }
 
+/// Runs a command's blocking work off Tauri's async runtime.
+///
+/// Every command that shells out to ffprobe, ffmpeg or yt-dlp waits for it,
+/// and done inline that parks one of the runtime's few worker threads for as
+/// long as it takes. A handful of pasted links, each probing for up to 25 s,
+/// was enough to stall every other command — the store, dialogs, the updater —
+/// and reqwest's blocking client refuses outright to run inside the runtime in
+/// debug builds, which is what a first paste in `npm run app` tripped over.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("That stopped unexpectedly: {e}"))?
+}
+
 /// Probes a dropped file and extracts a poster frame for its card.
 #[tauri::command]
 async fn inspect_file(
@@ -137,12 +153,22 @@ async fn inspect_file(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<FileInfo, String> {
+    let bins = state.bins.clone();
+    let cache = app.path().app_cache_dir().ok();
+    blocking(move || inspect_file_now(&bins, cache, path)).await
+}
+
+fn inspect_file_now(
+    bins: &Binaries,
+    cache: Option<PathBuf>,
+    path: String,
+) -> Result<FileInfo, String> {
     let input = PathBuf::from(&path);
     if !input.is_file() {
         return Err("That file doesn't exist.".into());
     }
 
-    let info = ffmpeg::probe(&state.bins, &input)?;
+    let info = ffmpeg::probe(bins, &input)?;
 
     // A frame from 25% in is usually more representative than frame zero,
     // which is often black or a fade-in.
@@ -150,10 +176,10 @@ async fn inspect_file(
     // The frame comes back as a data URL rather than a file path: these are a
     // few KB each, and inlining them avoids the asset protocol entirely — no
     // scope config, no CSP origin to keep in sync, nothing to leave on disk.
-    let thumbnail = app.path().app_cache_dir().ok().and_then(|cache| {
+    let thumbnail = cache.and_then(|cache| {
         std::fs::create_dir_all(&cache).ok()?;
         let out = cache.join(format!("thumb-{}.jpg", fast_hash(&path)));
-        ffmpeg::thumbnail(&state.bins, &input, &out, info.duration * 0.25, 320).ok()?;
+        ffmpeg::thumbnail(bins, &input, &out, info.duration * 0.25, 320).ok()?;
         let bytes = std::fs::read(&out).ok()?;
         let _ = std::fs::remove_file(&out);
         Some(format!(
@@ -182,9 +208,13 @@ async fn preview_plan(
     settings: Settings,
     edits: Option<Edits>,
 ) -> Result<encode::Plan, String> {
-    let input = PathBuf::from(&path);
-    let info = ffmpeg::probe(&state.bins, &input)?;
-    encode::plan(&info, &settings, &edits.unwrap_or_default(), &state.bins)
+    let bins = state.bins.clone();
+    blocking(move || {
+        let input = PathBuf::from(&path);
+        let info = ffmpeg::probe(&bins, &input)?;
+        encode::plan(&info, &settings, &edits.unwrap_or_default(), &bins)
+    })
+    .await
 }
 
 /// Reads a pasted link without downloading anything.
@@ -194,8 +224,11 @@ async fn inspect_url(app: AppHandle, url: String) -> Result<download::UrlInfo, S
         return Err("That doesn't look like a link.".into());
     }
     let data_dir = app_data_dir(&app)?;
-    let bin = download::ensure(&data_dir, |_| {})?;
-    download::probe_url(&bin, &url)
+    blocking(move || {
+        let bin = download::ensure(&data_dir, |_| {})?;
+        download::probe_url(&bin, &url)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -289,15 +322,13 @@ async fn frame_at(
         .path()
         .app_cache_dir()
         .map_err(|e| format!("No cache folder: {e}"))?;
-    // Wide enough to fill the editor's preview without being upscaled.
-    frame_data_url(
-        &state.bins,
-        &PathBuf::from(path),
-        time.max(0.0),
-        &cache,
-        960,
-    )
-    .ok_or_else(|| "Couldn't read a frame from that video.".to_string())
+    let bins = state.bins.clone();
+    blocking(move || {
+        // Wide enough to fill the editor's preview without being upscaled.
+        frame_data_url(&bins, &PathBuf::from(path), time.max(0.0), &cache, 960)
+            .ok_or_else(|| "Couldn't read a frame from that video.".to_string())
+    })
+    .await
 }
 
 /// Lets the webview load this file directly, so the editor can play it.
@@ -329,7 +360,9 @@ async fn preview_proxy(
         .join(format!("{}.mp4", preview_key(&input)));
 
     if !out.is_file() {
-        ffmpeg::preview_proxy(&state.bins, &input, &out)?;
+        let bins = state.bins.clone();
+        let (input, target) = (input.clone(), out.clone());
+        blocking(move || ffmpeg::preview_proxy(&bins, &input, &target)).await?;
     }
 
     app.asset_protocol_scope()
@@ -464,8 +497,17 @@ async fn filmstrip(
         .path()
         .app_cache_dir()
         .map_err(|e| format!("No cache folder: {e}"))?;
-    let input = PathBuf::from(path);
-    let info = ffmpeg::probe(&state.bins, &input)?;
+    let bins = state.bins.clone();
+    blocking(move || filmstrip_now(&bins, &cache, PathBuf::from(path), count)).await
+}
+
+fn filmstrip_now(
+    bins: &Binaries,
+    cache: &Path,
+    input: PathBuf,
+    count: usize,
+) -> Result<Vec<String>, String> {
+    let info = ffmpeg::probe(bins, &input)?;
 
     let count = count.clamp(4, 24);
     let mut frames = Vec::with_capacity(count);
@@ -474,7 +516,7 @@ async fn filmstrip(
         // first frame isn't the usual black fade-in.
         let at = info.duration * ((i as f64 + 0.5) / count as f64);
         // Small: they're shown a few dozen pixels wide in the strip.
-        match frame_data_url(&state.bins, &input, at, &cache, 160) {
+        match frame_data_url(bins, &input, at, cache, 160) {
             Some(url) => frames.push(url),
             None => break,
         }
@@ -504,7 +546,8 @@ pub struct Capabilities {
 /// Lets the UI grey out codecs this ffmpeg build can't produce.
 #[tauri::command]
 async fn capabilities(state: State<'_, AppState>) -> Result<Capabilities, String> {
-    let encoders = ffmpeg::available_encoders(&state.bins);
+    let bins = state.bins.clone();
+    let encoders = blocking(move || Ok(ffmpeg::available_encoders(&bins))).await?;
     let hardware = encoders
         .iter()
         .filter(|e| {
