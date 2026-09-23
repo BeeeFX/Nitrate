@@ -1623,3 +1623,35 @@ fn the_filmstrip_comes_back_whole_from_a_few_runs() {
     assert!(still[0].is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn downloads_are_only_as_tall_as_the_encode_needs() {
+    let dir = temp_dir("download-height");
+    let set = settings(10_000_000, &dir);
+
+    // Ten minutes into 10 MB comes out small; fetching 1080p for it was waste.
+    let ten_minutes = encode::download_height(&set, Some(600.0));
+    assert!(
+        ten_minutes <= 540,
+        "fetched {ten_minutes}p for a 10-minute squeeze"
+    );
+    assert!(ten_minutes >= 360);
+
+    // A short clip can use all of it.
+    assert_eq!(encode::download_height(&set, Some(20.0)), 1080);
+
+    // Nothing is being squeezed, or nobody knows how long it is: full height.
+    let mut quality = set.clone();
+    quality.mode = TargetMode::Quality;
+    assert_eq!(encode::download_height(&quality, Some(600.0)), 1080);
+    let mut held = set.clone();
+    held.auto_compress_downloads = false;
+    assert_eq!(encode::download_height(&held, Some(600.0)), 1080);
+    assert_eq!(encode::download_height(&set, None), 1080);
+
+    // Never above what the user allowed.
+    let mut capped = set.clone();
+    capped.max_download_height = 720;
+    assert_eq!(encode::download_height(&capped, Some(20.0)), 720);
+    let _ = std::fs::remove_dir_all(&dir);
+}

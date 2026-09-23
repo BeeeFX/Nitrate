@@ -499,6 +499,54 @@ pub fn plan(
     })
 }
 
+/// How tall a download is worth fetching, for what it's about to become.
+///
+/// A ten-minute video squeezed into 10 MB comes out around 360p, but was
+/// fetched at 1080p every time — five to ten times the bandwidth, spent on
+/// pixels the encode then throws away. When the download goes straight into
+/// a size-targeted encode, the height comes from the same bits-per-pixel
+/// floor the planner uses, one rung higher for headroom: that estimate
+/// assumes 16:9 at 30 fps, and scaling down from a little more detail looks
+/// better than from exactly enough.
+///
+/// Anything that isn't about to be squeezed — quality or keep mode, a link
+/// held back for trimming, a length nobody knows — gets the full ceiling.
+pub fn download_height(settings: &Settings, duration: Option<f64>) -> u32 {
+    let ceiling = settings.max_download_height.max(144);
+    let Some(duration) = duration.filter(|d| *d > 0.0) else {
+        return ceiling;
+    };
+    if settings.mode != TargetMode::Size || !settings.auto_compress_downloads {
+        return ceiling;
+    }
+
+    let margin = settings.safety_margin.clamp(0.5, 0.999);
+    let total_kbps = settings.target_bytes as f64 * 8.0 * margin / 1000.0 / duration;
+    let audio_kbps = match settings.audio_codec {
+        AudioCodec::None => 0.0,
+        _ => settings.audio_bitrate_kbps as f64,
+    };
+    let video_kbps = total_kbps * 0.99 - audio_kbps;
+    let carries = |h: u32| {
+        let pixels = h as f64 * (h as f64 * 16.0 / 9.0) * 30.0;
+        video_kbps * 1000.0 / pixels >= settings.video_codec.min_bpp()
+    };
+
+    let lowest = *LADDER.last().unwrap_or(&180);
+    let fits = LADDER
+        .iter()
+        .copied()
+        .find(|&h| carries(h))
+        .unwrap_or(lowest);
+    let with_headroom = LADDER
+        .iter()
+        .copied()
+        .rev()
+        .find(|&h| h > fits)
+        .unwrap_or(fits);
+    with_headroom.max(360).min(ceiling)
+}
+
 /// Fills in a copied audio track's bitrate when the file doesn't state one.
 ///
 /// Call between probing and planning. It's a pass over the file, so only

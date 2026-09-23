@@ -826,6 +826,7 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
 
     let parsed: DumpJson = serde_json::from_str(&stdout)
         .map_err(|_| "The downloader returned something unexpected for that link.".to_string())?;
+    crate::media::remember_probe(url, &stdout);
 
     if parsed.is_live == Some(true) {
         return Err("That's a live stream — it has no fixed length to compress.".into());
@@ -917,15 +918,10 @@ pub fn fetch(
     // *and still exits zero*, leaving separate video and audio files behind.
     let ffmpeg_path = bins.ffmpeg.clone();
 
-    let format = format!(
-        "bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
-        h = max_height
-    );
-
     let mut child = yt_dlp_command(bin)
         .args(["--no-playlist", "--newline"])
         .args(["--socket-timeout", "20", "--retries", "3"])
-        .args(["-f", &format])
+        .args(format_args(max_height))
         .args(["--merge-output-format", "mp4"])
         // A fixed output name means we don't have to parse yt-dlp's filename
         // rules to find what it produced.
@@ -988,6 +984,23 @@ pub fn fetch(
 
     on_progress(1.0);
     find_downloaded(work_dir).map(Ok)
+}
+
+/// Best video and audio no larger than `res`, where res is the short side.
+///
+/// It was `bv*[height<=h]`, which caps the wrong side of a vertical video: a
+/// 1080p Short is 1080x1920, so a 1080 cap passed it over for 480x854. And a
+/// format with no stated height fails `height<=` outright, so it fell to the
+/// uncapped fallback — which on some sites was 4K. Sorting by resolution
+/// instead prefers the largest that fits, whichever way up, and ranks unknown
+/// sizes last rather than letting them skip the limit.
+pub(crate) fn format_args(res: u32) -> [String; 4] {
+    [
+        "-f".into(),
+        "bv*+ba/b".into(),
+        "-S".into(),
+        format!("res:{res}"),
+    ]
 }
 
 /// Machine-readable progress on stdout, rather than scraping the human-facing

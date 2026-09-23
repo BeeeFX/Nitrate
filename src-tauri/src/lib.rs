@@ -30,7 +30,19 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// anything to encode; a file is ready immediately.
 enum JobSource {
     File(PathBuf),
-    Url { url: String, title: String },
+    Url {
+        url: String,
+        title: String,
+        /// Only this stretch of it, in seconds, when a part was chosen.
+        section: Option<(f64, f64)>,
+    },
+}
+
+/// A stretch of a video to download instead of all of it.
+#[derive(serde::Deserialize)]
+struct Section {
+    start: f64,
+    end: f64,
 }
 
 struct QueuedJob {
@@ -234,6 +246,9 @@ async fn inspect_url(app: AppHandle, url: String) -> Result<download::UrlInfo, S
     .await
 }
 
+// One argument per thing the frontend sends; bundling them into a struct
+// would only move the list.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn start_job(
     state: State<'_, AppState>,
@@ -243,6 +258,7 @@ async fn start_job(
     title: Option<String>,
     settings: Settings,
     edits: Option<Edits>,
+    section: Option<Section>,
 ) -> Result<(), String> {
     // The id becomes part of a temp folder that's deleted wholesale when a
     // download fails, so it's held to the shape the frontend actually mints.
@@ -261,6 +277,15 @@ async fn start_job(
         (None, Some(u)) => JobSource::Url {
             title: title.unwrap_or_else(|| download::site_name(&u)),
             url: u,
+            section: match section {
+                Some(Section { start, end })
+                    if start.is_finite() && end.is_finite() && start >= 0.0 && end > start =>
+                {
+                    Some((start, end))
+                }
+                Some(_) => return Err("That part of the video doesn't make sense.".into()),
+                None => None,
+            },
         },
         _ => return Err("A job needs either a file or a link.".into()),
     };
@@ -833,7 +858,11 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
 
     let (input, name_hint, download_notes) = match source {
         JobSource::File(path) => (path, None, Vec::new()),
-        JobSource::Url { url, title } => {
+        JobSource::Url {
+            url,
+            title,
+            section,
+        } => {
             let data_dir = match app_data_dir(app) {
                 Ok(d) => d,
                 Err(e) => {
@@ -873,7 +902,8 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
                 &state.bins,
                 &url,
                 &dir,
-                settings.max_download_height,
+                &|length| encode::download_height(&settings, length),
+                section,
                 &cancel,
                 |p| emit(0.05 + p * 0.40, "Downloading"),
             );

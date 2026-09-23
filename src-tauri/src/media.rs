@@ -82,6 +82,8 @@ struct Entry {
     #[serde(default)]
     is_live: Option<bool>,
     #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
     formats: Vec<Format>,
     #[serde(default)]
     thumbnails: Vec<Thumbnail>,
@@ -101,11 +103,17 @@ struct Thumbnail {
 }
 
 /// One thing to go and get, once we know what kind it is.
+#[derive(Clone)]
 enum Planned {
     /// A still, already resolved to a direct image URL.
     Photo(String),
     /// Something yt-dlp can download itself, at this position in the post.
-    Playable { index: usize, gif: bool },
+    Playable {
+        index: usize,
+        gif: bool,
+        /// Decides how tall a copy is worth fetching.
+        duration: Option<f64>,
+    },
 }
 
 /// Twitter stores animated GIFs as MP4 like everything else, but files them
@@ -286,6 +294,112 @@ fn run_download(
     }))
 }
 
+/// What each entry of a post is, in the order the post lists them.
+///
+/// `None` keeps an entry's place: yt-dlp addresses items by position, so one
+/// that couldn't be read still counts.
+fn plan_entries(entries: impl Iterator<Item = Option<Entry>>) -> (Vec<Planned>, bool) {
+    let mut planned = Vec::new();
+    let mut live = false;
+    for (index, entry) in entries.enumerate() {
+        let Some(entry) = entry else {
+            continue;
+        };
+
+        // A stream still in progress has no end to download to, and yt-dlp
+        // will happily record one until it's stopped — which, with nothing on
+        // screen but "Downloading", nobody would think to do. The probe checks
+        // this too, but a probe that times out lets a link through unchecked.
+        if entry.is_live == Some(true) {
+            live = true;
+            continue;
+        }
+
+        if !entry.formats.is_empty() {
+            planned.push(Planned::Playable {
+                index,
+                gif: looks_like_gif(&entry),
+                duration: entry.duration.filter(|d| *d > 0.0),
+            });
+        } else if let Some(best) = entry.thumbnails.last() {
+            // yt-dlp lists thumbnails worst first, so the last is the largest —
+            // and for a photo post that is the photo.
+            planned.push(Planned::Photo(best.url.clone()));
+        }
+    }
+    (planned, live)
+}
+
+/// What the probe found, kept briefly so the fetch needn't ask again.
+///
+/// A pasted link was read by yt-dlp three times — the probe, the plan and the
+/// fetch — each paying for a whole extraction, and on YouTube that's seconds
+/// apiece. The probe's answer is exactly what the plan needs, so the plan
+/// reuses it. The fetch still asks for itself: download addresses are signed
+/// and short-lived, and the retry ladder depends on a fresh extraction.
+///
+/// Only the plan is kept, not the JSON, which for one YouTube video runs to
+/// megabytes.
+struct Recalled {
+    url: String,
+    at: Instant,
+    items: Vec<Planned>,
+    live: bool,
+}
+
+static PROBED: std::sync::Mutex<Vec<Recalled>> = std::sync::Mutex::new(Vec::new());
+
+/// Long enough to cover the wait between pasting a link and pressing start.
+const PROBE_KEPT_FOR: Duration = Duration::from_secs(15 * 60);
+
+/// Called by the probe with what `--dump-single-json` printed.
+pub(crate) fn remember_probe(url: &str, json: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return;
+    };
+    // A post with several items is a playlist whose entries are the items; a
+    // single video is its own only entry.
+    let entries: Vec<Option<Entry>> = match value.get("entries").and_then(|e| e.as_array()) {
+        Some(list) => list
+            .iter()
+            .map(|e| serde_json::from_value(e.clone()).ok())
+            .collect(),
+        None => vec![serde_json::from_value(value).ok()],
+    };
+    let (items, live) = plan_entries(entries.into_iter());
+    // Nothing playable means a photo post or something odd, and those need
+    // the full plan — Reddit's images, for one, are found in yt-dlp's stderr.
+    if !live && !items.iter().any(|i| matches!(i, Planned::Playable { .. })) {
+        return;
+    }
+
+    let mut kept = PROBED.lock().unwrap_or_else(|e| e.into_inner());
+    kept.retain(|r| r.url != url && r.at.elapsed() < PROBE_KEPT_FOR);
+    kept.push(Recalled {
+        url: url.to_string(),
+        at: Instant::now(),
+        items,
+        live,
+    });
+    if kept.len() > 16 {
+        kept.remove(0);
+    }
+}
+
+fn recall_probe(url: &str) -> Option<Plan> {
+    let kept = PROBED.lock().unwrap_or_else(|e| e.into_inner());
+    let found = kept
+        .iter()
+        .rev()
+        .find(|r| r.url == url && r.at.elapsed() < PROBE_KEPT_FOR)?;
+    Some(Plan {
+        items: found.items.clone(),
+        trouble: found
+            .live
+            .then(|| "That's a live stream. Send it again once it has ended.".into()),
+    })
+}
+
 /// Asks yt-dlp what's in a post without downloading any of it.
 fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
     // A Reddit post of nothing but images is answered from its page, which the
@@ -298,6 +412,10 @@ fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
                 trouble: None,
             };
         }
+    }
+
+    if let Some(plan) = recall_probe(url) {
+        return plan;
     }
 
     crate::download::pace();
@@ -341,32 +459,12 @@ fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
         planned.push(Planned::Photo(url));
     }
 
-    let mut live = false;
-    for (index, line) in text.lines().filter(|l| l.starts_with('{')).enumerate() {
-        let Ok(entry) = serde_json::from_str::<Entry>(line) else {
-            continue;
-        };
-
-        // A stream still in progress has no end to download to, and yt-dlp
-        // will happily record one until it's stopped — which, with nothing on
-        // screen but "Downloading", nobody would think to do. The probe checks
-        // this too, but a probe that times out lets a link through unchecked.
-        if entry.is_live == Some(true) {
-            live = true;
-            continue;
-        }
-
-        if !entry.formats.is_empty() {
-            planned.push(Planned::Playable {
-                index,
-                gif: looks_like_gif(&entry),
-            });
-        } else if let Some(best) = entry.thumbnails.last() {
-            // yt-dlp lists thumbnails worst first, so the last is the largest —
-            // and for a photo post that is the photo.
-            planned.push(Planned::Photo(best.url.clone()));
-        }
-    }
+    let entries = text
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .map(|line| serde_json::from_str::<Entry>(line).ok());
+    let (found, live) = plan_entries(entries);
+    planned.extend(found);
 
     // Only consulted if nothing was found. A post can hit a rate limit on one
     // of its items and still hand over the rest, and that isn't worth a warning.
@@ -690,7 +788,8 @@ pub fn fetch_post(
     bins: &Binaries,
     url: &str,
     work_dir: &Path,
-    max_height: u32,
+    height_for: &dyn Fn(Option<f64>) -> u32,
+    section: Option<(f64, f64)>,
     cancel: &Arc<AtomicBool>,
     mut on_progress: impl FnMut(f64),
 ) -> Result<Result<Vec<MediaItem>, Cancelled>, String> {
@@ -727,14 +826,25 @@ pub fn fetch_post(
                     note: None,
                 });
             }
-            Planned::Playable { index, gif } => {
+            Planned::Playable {
+                index,
+                gif,
+                duration,
+            } => {
+                // Only the part that's wanted, when a part was chosen — which
+                // is also all the height has to be worked out for.
+                let length = match section {
+                    Some((start, end)) => Some(end - start),
+                    None => *duration,
+                };
                 let fetched = fetch_playable(
                     yt,
                     quickjs,
                     bins,
                     url,
                     work_dir,
-                    max_height,
+                    height_for(length),
+                    section,
                     *index,
                     done,
                     cancel,
@@ -798,15 +908,12 @@ fn fetch_playable(
     url: &str,
     work_dir: &Path,
     max_height: u32,
+    section: Option<(f64, f64)>,
     index: usize,
     slot: usize,
     cancel: &AtomicBool,
     on_progress: &mut dyn FnMut(f64),
 ) -> Result<Result<(PathBuf, Option<String>), Cancelled>, String> {
-    let format = format!(
-        "bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
-        h = max_height
-    );
     let template = format!("{}/media-{slot}.%(ext)s", work_dir.display());
     let runtime = crate::download::runtime_args(quickjs);
 
@@ -829,15 +936,21 @@ fn fetch_playable(
             .args(["--socket-timeout", "20", "--retries", "3"])
             .args(&runtime)
             .args(&attempt.args)
-            .args(["-f", &format])
+            .args(crate::download::format_args(max_height))
             .args(["--merge-output-format", "mp4"])
             // One-based, and it's how yt-dlp addresses a single item of a post
             // that holds several.
             .args(["--playlist-items", &(index + 1).to_string()])
             .args(["-o", &template])
             .arg("--ffmpeg-location")
-            .arg(&bins.ffmpeg)
-            .arg(url);
+            .arg(&bins.ffmpeg);
+        if let Some((start, end)) = section {
+            // The cut lands on the keyframe at or before the start, which is
+            // close enough for something about to be trimmed or re-encoded,
+            // and far cheaper than re-encoding around the cut to be exact.
+            cmd.args(["--download-sections", &format!("*{start:.3}-{end:.3}")]);
+        }
+        cmd.arg(url);
 
         // Video and audio arrive as two downloads, each counting up from
         // zero; the bar holds its high point rather than running backwards
@@ -1010,6 +1123,50 @@ fn newest_file(dir: &Path, prefix: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_plan_reuses_what_the_probe_found() {
+        let single = r#"{"duration": 42.0, "formats": [{"url": "https://v/1.mp4"}]}"#;
+        remember_probe("https://example.com/single", single);
+        let plan = recall_probe("https://example.com/single").expect("remembered");
+        assert!(matches!(
+            plan.items.as_slice(),
+            [Planned::Playable { index: 0, gif: false, duration: Some(d) }] if *d == 42.0
+        ));
+
+        // A post of several: entries in order, positions kept for yt-dlp.
+        let post = r#"{"entries": [
+            {"formats": [{"url": "https://video.twimg.com/tweet_video/a.mp4"}]},
+            {"formats": [], "thumbnails": [{"url": "https://i/small.jpg"}, {"url": "https://i/big.jpg"}]},
+            {"formats": [{"url": "https://v/3.mp4"}], "duration": 9}
+        ]}"#;
+        remember_probe("https://example.com/post", post);
+        let plan = recall_probe("https://example.com/post").expect("remembered");
+        assert!(matches!(
+            plan.items.as_slice(),
+            [
+                Planned::Playable { index: 0, gif: true, .. },
+                Planned::Photo(big),
+                Planned::Playable { index: 2, gif: false, .. },
+            ] if big == "https://i/big.jpg"
+        ));
+
+        // Nothing playable goes to the full plan, which can see Reddit's
+        // images in yt-dlp's complaints; a live stream is remembered as one.
+        remember_probe(
+            "https://example.com/photos",
+            r#"{"formats": [], "thumbnails": []}"#,
+        );
+        assert!(recall_probe("https://example.com/photos").is_none());
+        remember_probe(
+            "https://example.com/live",
+            r#"{"is_live": true, "formats": [{}]}"#,
+        );
+        let live = recall_probe("https://example.com/live").expect("remembered");
+        assert!(live.items.is_empty() && live.trouble.is_some());
+
+        assert!(recall_probe("https://example.com/never-probed").is_none());
+    }
+
     #[cfg(unix)]
     fn shell(script: &str) -> Command {
         let mut cmd = Command::new("sh");
@@ -1075,6 +1232,7 @@ mod tests {
     fn spots_a_twitter_gif_by_its_path() {
         let gif = Entry {
             is_live: None,
+            duration: None,
             formats: vec![Format {
                 url: Some("https://video.twimg.com/tweet_video/abc.mp4".into()),
             }],
@@ -1083,6 +1241,7 @@ mod tests {
         };
         let video = Entry {
             is_live: None,
+            duration: None,
             formats: vec![Format {
                 url: Some("https://video.twimg.com/ext_tw_video/123/vid.mp4".into()),
             }],
