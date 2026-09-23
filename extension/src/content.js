@@ -12,8 +12,14 @@ const LOG = "[Nitrate]";
 
 // How long the page gets to build its action row before the corner button is
 // accepted as the answer.
-const START = Date.now();
+//
+// Counted from the latest navigation rather than from load. These are
+// single-page apps, and timing from load meant any in-app navigation after
+// the first four seconds put the corner button up immediately, flashing it
+// on every page until the real row rendered.
 const FALLBACK_DELAY = 4000;
+let pageSince = Date.now();
+let pageHref = location.href;
 
 // Site navigation looks exactly like an action row to a structural search —
 // Instagram's sidebar is a tall column of labelled icons, same as a reel's
@@ -684,6 +690,11 @@ function scopes() {
 }
 
 function scan() {
+  if (location.href !== pageHref) {
+    pageHref = location.href;
+    pageSince = Date.now();
+  }
+
   // Some pages on a supported site have nothing to offer — a Twitch channel
   // that's live rather than a recording. Both directions matter: navigating
   // onto one has to take the button away, and these are single-page apps, so
@@ -813,7 +824,7 @@ function ensureFallback() {
   // These pages build their action rows well after first paint, so an
   // immediate fallback would routinely beat the real thing. Give the page a
   // few seconds to finish before concluding there's nothing to attach to.
-  if (Date.now() - START < FALLBACK_DELAY) {
+  if (Date.now() - pageSince < FALLBACK_DELAY) {
     scheduleScan();
     return;
   }
@@ -838,17 +849,30 @@ function rerender() {
 
 // SPA navigation and infinite feeds both mean the DOM never settles, so the
 // scan is debounced rather than run per mutation.
+//
+// With a ceiling. A pure debounce only fires after the page has been quiet
+// for the whole interval, and some never are: chat replay on a Twitch VOD
+// adds messages several times a second. Every one pushed the scan back
+// again, so it never ran — no inline button and, since the fallback is
+// decided inside the scan, no corner button either.
+const SETTLE = 400;
+const MAX_WAIT = 1500;
 let pending = 0;
+let waitingSince = 0;
 
 function scheduleScan() {
   clearTimeout(pending);
+  const now = Date.now();
+  if (!waitingSince) waitingSince = now;
+  const wait = Math.max(0, Math.min(SETTLE, waitingSince + MAX_WAIT - now));
   pending = setTimeout(() => {
+    waitingSince = 0;
     try {
       scan();
     } catch {
       // Never let a site's markup break the page it's injected into.
     }
-  }, 400);
+  }, wait);
 }
 
 function observe() {

@@ -385,9 +385,12 @@ function makeSandbox(hostname, pathname, fixture) {
     addEventListener() {},
   };
 
+  const observers = [];
+
   return {
     logs,
     extras,
+    observers,
     sandbox: {
       document,
       location: {
@@ -420,7 +423,12 @@ function makeSandbox(hostname, pathname, fixture) {
           onChanged: { addListener() {} },
         },
       },
+      // Kept rather than ignored, so a check can play a page that never stops
+      // changing.
       MutationObserver: class {
+        constructor(callback) {
+          observers.push(callback);
+        }
         observe() {}
         disconnect() {}
       },
@@ -436,12 +444,18 @@ function makeSandbox(hostname, pathname, fixture) {
 // fallback path, which is the one an empty page always ends on, never runs.
 const settle = () => new Promise((r) => setTimeout(r, 5000));
 
-async function run(file, hostname, pathname, fixture) {
+async function run(file, hostname, pathname, fixture, { busy = false } = {}) {
   const code = await readFile(join(root, "extension", "src", file), "utf8");
   const context = makeSandbox(hostname, pathname, fixture);
   vm.createContext(context.sandbox);
   new vm.Script(code, { filename: file }).runInContext(context.sandbox);
+  // A page that never goes quiet, the way chat replay on a Twitch VOD doesn't:
+  // a mutation every 100ms, far inside the scan's 400ms debounce.
+  const churn = busy
+    ? setInterval(() => context.observers.forEach((callback) => callback([])), 100)
+    : null;
   await settle();
+  clearInterval(churn);
   return context;
 }
 
@@ -616,6 +630,22 @@ async function main() {
     } catch (error) {
       fail(`${what}: ${error.message}`);
     }
+  }
+
+  // A debounce with no ceiling waits for a quiet moment that a busy page never
+  // has, so the scan was postponed for as long as the page stayed busy —
+  // neither the inline button nor the corner one ever arrived.
+  try {
+    const { logs } = await run("content.js", "www.twitch.tv", "/videos/1", undefined, {
+      busy: true,
+    });
+    if (!logs.some((line) => line.includes("floating button"))) {
+      fail("a page that never goes quiet: the scan never ran");
+    } else {
+      console.log("  ok    a page that never goes quiet still gets scanned");
+    }
+  } catch (error) {
+    fail(`a page that never goes quiet: ${error.message}`);
   }
 
   try {

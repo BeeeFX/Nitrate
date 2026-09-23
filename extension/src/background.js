@@ -32,10 +32,16 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  // A streamed video's source is a `blob:` address that only means something
+  // inside that tab — which is every video on the five supported sites — so
+  // it counts as no source at all, and the page (or the embed it sits in)
+  // is sent instead. Passing it on only ever flashed the red "!".
+  const videoSrc = info.srcUrl && isSendable(info.srcUrl) ? info.srcUrl : null;
+
   // Prefer whatever the user actually right-clicked over the page it sits on.
   const target =
     (info.menuItemId === MENU_LINK && info.linkUrl) ||
-    (info.menuItemId === MENU_VIDEO && (info.srcUrl || info.pageUrl)) ||
+    (info.menuItemId === MENU_VIDEO && (videoSrc || info.frameUrl || info.pageUrl)) ||
     info.pageUrl ||
     tab?.url;
 
