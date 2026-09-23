@@ -25,6 +25,7 @@
 //! is on i.redd.it, which serves it over ordinary HTTP. The block is on reading
 //! Reddit's API, not on reaching its images.
 
+use crate::children::Spawn;
 use crate::ffmpeg::{Binaries, Cancelled};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -142,7 +143,7 @@ fn run_capped(cmd: &mut Command, limit: Duration) -> Option<Output> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_contained()
         .ok()?;
 
     let mut pipes = (child.stdout.take(), child.stderr.take());
@@ -561,7 +562,7 @@ pub fn to_gif(bins: &Binaries, input: &Path, width: u32) -> Result<PathBuf, Stri
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_contained()
         .map_err(|e| format!("Couldn't run ffmpeg: {e}"))?;
 
     if !status.success() {
@@ -715,7 +716,7 @@ fn fetch_playable(
             .arg(&bins.ffmpeg)
             .arg(url)
             .stdin(Stdio::null())
-            .output()
+            .output_contained()
             .map_err(|e| format!("Couldn't start the downloader: {e}"))?;
 
         if output.status.success() {
@@ -758,7 +759,7 @@ fn fetch_with_gallery(
         .args(["--no-mtime", "--quiet"])
         .arg(url)
         .stdin(Stdio::null())
-        .output()
+        .output_contained()
         .map_err(|e| format!("Couldn't start the image downloader: {e}"))?;
 
     if cancel.load(Ordering::Relaxed) {

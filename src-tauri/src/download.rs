@@ -5,6 +5,7 @@
 //! the background. That costs nothing in practice: you can only use it when
 //! you're online anyway.
 
+use crate::children::Spawn;
 use crate::ffmpeg::Binaries;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
@@ -359,7 +360,7 @@ pub fn refresh_if_stale(data_dir: &Path) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_contained()
         .map(|s| s.success())
         .unwrap_or(false);
 
@@ -584,7 +585,7 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_contained()
         .map_err(|e| format!("Couldn't run the downloader: {e}"))?;
 
     // Drained on a thread rather than left in the pipe. A post with several
@@ -792,7 +793,7 @@ pub fn fetch(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_contained()
         .map_err(|e| format!("Couldn't start the downloader: {e}"))?;
 
     let stderr_tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));

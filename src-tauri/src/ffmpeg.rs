@@ -1,5 +1,6 @@
 //! Locating, probing and driving the bundled ffmpeg/ffprobe binaries.
 
+use crate::children::Spawn;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -207,7 +208,7 @@ pub fn probe(bins: &Binaries, input: &Path) -> Result<MediaInfo, String> {
         ])
         .arg(input)
         .stdin(Stdio::null())
-        .output()
+        .output_contained()
         .map_err(|e| format!("Couldn't run ffprobe: {e}"))?;
 
     if !output.status.success() {
@@ -314,7 +315,7 @@ pub fn thumbnail(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_contained()
         .map_err(|e| format!("Couldn't run ffmpeg: {e}"))?;
 
     if status.success() {
@@ -353,7 +354,7 @@ pub fn run(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_contained()
         .map_err(|e| format!("Couldn't start ffmpeg: {e}"))?;
 
     // ffmpeg will block once the stderr pipe fills, so it must be drained
@@ -469,7 +470,7 @@ pub fn available_encoders(bins: &Binaries) -> Vec<String> {
     let Ok(output) = base_command(&bins.ffmpeg)
         .args(["-hide_banner", "-encoders"])
         .stdin(Stdio::null())
-        .output()
+        .output_contained()
     else {
         return Vec::new();
     };
@@ -509,7 +510,7 @@ pub fn encoder_works(bins: &Binaries, encoder: &str) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_contained()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -576,7 +577,7 @@ pub fn preview_proxy(bins: &Binaries, input: &Path, out: &Path) -> Result<(), St
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_contained()
         .map_err(|e| format!("Couldn't run ffmpeg: {e}"))?;
 
     if !status.success() {

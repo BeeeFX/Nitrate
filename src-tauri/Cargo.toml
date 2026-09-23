@@ -44,7 +44,12 @@ sha2 = "0.10.9"
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4.1"
 # Hides the console window that would otherwise flash on every ffmpeg invocation.
-windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [profile.release]
 codegen-units = 1

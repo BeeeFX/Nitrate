@@ -1,6 +1,7 @@
 //! Nitrate — compress any video to fit a target file size.
 
 // Public so the integration tests can drive the encoder without a running app.
+mod children;
 pub mod deeplink;
 pub mod download;
 pub mod encode;
