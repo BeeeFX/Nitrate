@@ -1582,3 +1582,44 @@ fn a_gpu_encoder_that_fails_hands_over_to_software() {
         .any(|n| n.contains("finished in software")));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_filmstrip_comes_back_whole_from_a_few_runs() {
+    let dir = temp_dir("filmstrip");
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 12, 3000);
+    let bins = ffmpeg::resolve();
+
+    // Twelve slices, plus one past the end that can't produce a frame.
+    let mut times: Vec<f64> = (0..12).map(|i| 12.0 * (i as f64 + 0.5) / 12.0).collect();
+    times.push(60.0);
+    let frames = ffmpeg::frames(&bins, &input, &times, 160, &dir);
+
+    assert_eq!(frames.len(), 13);
+    assert!(frames[..12].iter().all(Option::is_some), "{frames:?}");
+    assert!(frames[12].is_none(), "past the end there's nothing to show");
+
+    // Every one a real picture, and not all the same one.
+    let sizes: std::collections::HashSet<u64> = frames[..12]
+        .iter()
+        .flatten()
+        .map(|f| std::fs::metadata(f).unwrap().len())
+        .collect();
+    assert!(sizes.len() > 6, "frames look identical: {sizes:?}");
+
+    // A photo has no timeline to seek along, and still gives its one frame.
+    let photo = ffmpeg_make(
+        &dir,
+        "photo.jpg",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x480",
+            "-frames:v",
+            "1",
+        ],
+    );
+    let still = ffmpeg::frames(&bins, &photo, &[0.02], 160, &dir);
+    assert!(still[0].is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -373,6 +373,63 @@ pub fn measure_audio_kbps(bins: &Binaries, input: &Path, duration: f64) -> Optio
     kbps
 }
 
+/// Several stills from one video, a few per ffmpeg run.
+///
+/// The editor's filmstrip used to start a process per frame — twelve, one
+/// after another, each paying its own start-up and probe, every time the
+/// editor opened. Here each frame is an input that seeks on its own, keeping
+/// the fast keyframe seek, and an output of its own, so a frame past the end
+/// costs only that frame. They go four to a run: all twelve at once would hold
+/// twelve decoders in memory together, which for 4K HEVC is most of a
+/// gigabyte.
+pub fn frames(
+    bins: &Binaries,
+    input: &Path,
+    times: &[f64],
+    width: u32,
+    dir: &Path,
+) -> Vec<Option<PathBuf>> {
+    const PER_RUN: usize = 4;
+
+    let outs: Vec<PathBuf> = (0..times.len())
+        .map(|i| dir.join(format!("frame-{i}.jpg")))
+        .collect();
+
+    for (batch, chunk) in times.chunks(PER_RUN).enumerate() {
+        let mut cmd = base_command(&bins.ffmpeg);
+        cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+        for at in chunk {
+            cmd.args(["-threads", "2"]);
+            // As in `thumbnail`: a photo is a fortieth of a second long, and
+            // seeking into one at all finds nothing.
+            if *at > 0.05 {
+                cmd.args(["-ss", &format!("{at:.3}")]);
+            }
+            cmd.arg("-i").arg(input);
+        }
+        for (i, _) in chunk.iter().enumerate() {
+            cmd.args([
+                "-map",
+                &format!("{i}:v:0"),
+                "-frames:v",
+                "1",
+                "-vf",
+                &format!("scale={width}:-2:flags=bilinear"),
+                "-q:v",
+                "4",
+            ])
+            .arg(&outs[batch * PER_RUN + i]);
+        }
+        let _ = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status_contained();
+    }
+
+    outs.into_iter().map(|p| p.is_file().then_some(p)).collect()
+}
+
 /// Grabs a single frame partway through the video.
 ///
 /// `width` matters: a card thumbnail wants a small one, but the editor's

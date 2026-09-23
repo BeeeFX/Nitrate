@@ -301,7 +301,13 @@ fn frame_data_url(
     width: u32,
 ) -> Option<String> {
     std::fs::create_dir_all(cache).ok()?;
-    let out = cache.join(format!("frame-{}-{}.jpg", width, (at * 1000.0) as u64));
+    // Named for the file as well as the moment: two videos of the same length
+    // asked for the same timestamp at once wrote the same temp file.
+    let out = cache.join(format!(
+        "frame-{:016x}-{width}-{}.jpg",
+        fast_hash(&input.to_string_lossy()),
+        (at * 1000.0) as u64
+    ));
     ffmpeg::thumbnail(bins, input, &out, at, width).ok()?;
     let bytes = std::fs::read(&out).ok()?;
     let _ = std::fs::remove_file(&out);
@@ -509,25 +515,79 @@ fn filmstrip_now(
     input: PathBuf,
     count: usize,
 ) -> Result<Vec<String>, String> {
-    let info = ffmpeg::probe(bins, &input)?;
-
     let count = count.clamp(4, 24);
-    let mut frames = Vec::with_capacity(count);
-    for i in 0..count {
-        // Sample from the middle of each slice rather than its edge, so the
-        // first frame isn't the usual black fade-in.
-        let at = info.duration * ((i as f64 + 0.5) / count as f64);
-        // Small: they're shown a few dozen pixels wide in the strip.
-        match frame_data_url(bins, &input, at, cache, 160) {
-            Some(url) => frames.push(url),
-            None => break,
-        }
+
+    // Kept per file, so opening the editor on the same clip again is instant
+    // rather than another round of decoding. Named like the preview proxies,
+    // by what the file is rather than only where it is.
+    let strips = cache.join("filmstrips");
+    let saved = strips.join(format!("{}-{count}.json", preview_key(&input)));
+    if let Some(frames) = std::fs::read_to_string(&saved)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .filter(|frames| !frames.is_empty())
+    {
+        return Ok(frames);
     }
 
+    let info = ffmpeg::probe(bins, &input)?;
+    // Sample from the middle of each slice rather than its edge, so the first
+    // frame isn't the usual black fade-in.
+    let times: Vec<f64> = (0..count)
+        .map(|i| info.duration * ((i as f64 + 0.5) / count as f64))
+        .collect();
+
+    static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let work = cache.join(format!(
+        "strip-{}-{}",
+        std::process::id(),
+        RUN.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&work).map_err(|e| format!("No cache folder: {e}"))?;
+
+    // Small: they're shown a few dozen pixels wide in the strip. A frame
+    // that didn't come out ends the strip there, as it always has.
+    let frames: Vec<String> = ffmpeg::frames(bins, &input, &times, 160, &work)
+        .into_iter()
+        .map_while(|frame| {
+            let bytes = std::fs::read(frame?).ok()?;
+            Some(format!(
+                "data:image/jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ))
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&work);
+
     if frames.is_empty() {
-        Err("Couldn't read frames from that video.".into())
-    } else {
-        Ok(frames)
+        return Err("Couldn't read frames from that video.".into());
+    }
+
+    if std::fs::create_dir_all(&strips).is_ok() {
+        if let Ok(text) = serde_json::to_string(&frames) {
+            let _ = std::fs::write(&saved, text);
+        }
+        forget_oldest(&strips, 200);
+    }
+    Ok(frames)
+}
+
+/// Keeps a cache folder to its newest `keep` files. These are small, but a tray
+/// app runs for months, and nothing else ever clears them.
+fn forget_oldest(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    if files.len() <= keep {
+        return;
+    }
+    files.sort();
+    for (_, path) in &files[..files.len() - keep] {
+        let _ = std::fs::remove_file(path);
     }
 }
 
