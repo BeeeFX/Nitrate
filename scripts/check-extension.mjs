@@ -11,6 +11,10 @@
 //   2. A page shaped like a reel feed, where the script has to place one button
 //      per rail — the case that kept regressing, because a single placed button
 //      used to end the search for the entire scope.
+//
+// Then what a button does once it's pressed — whether it waits to hear back
+// from the app before claiming success — and the same for the toolbar and the
+// right-click menu, which live in the background script.
 
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -39,8 +43,32 @@ const HOSTS = [
 // considered.
 // ---------------------------------------------------------------------------
 
+/**
+ * Just enough of EventTarget to press a button and blur a window.
+ *
+ * Listeners are kept in a set per type, as a browser does, so adding the same
+ * function twice is one listener — and a count that climbs with every click
+ * means fresh closures are piling up.
+ */
+function eventTarget(target) {
+  const listeners = new Map();
+  target.addEventListener = (type, listener) => {
+    if (!listeners.has(type)) listeners.set(type, new Set());
+    listeners.get(type).add(listener);
+  };
+  target.removeEventListener = (type, listener) => {
+    listeners.get(type)?.delete(listener);
+  };
+  target.listenerCount = (type) => listeners.get(type)?.size ?? 0;
+  target.dispatch = (type) => {
+    const event = { type, preventDefault() {}, stopPropagation() {} };
+    for (const listener of [...(listeners.get(type) ?? [])]) listener(event);
+  };
+  return target;
+}
+
 function makeElement(tag = "div", attrs = {}) {
-  const element = {
+  const element = eventTarget({
     tagName: tag.toUpperCase(),
     attrs: { ...attrs },
     dataset: {},
@@ -55,10 +83,10 @@ function makeElement(tag = "div", attrs = {}) {
       add(name) {
         element.className = `${element.className} ${name}`.trim();
       },
-      remove(name) {
+      remove(...names) {
         element.className = element.className
           .split(" ")
-          .filter((c) => c && c !== name)
+          .filter((c) => c && !names.includes(c))
           .join(" ");
       },
       contains: (name) => element.className.split(" ").includes(name),
@@ -68,8 +96,6 @@ function makeElement(tag = "div", attrs = {}) {
     },
     getAttribute: (name) => element.attrs[name] ?? null,
     hasAttribute: (name) => name in element.attrs,
-    addEventListener() {},
-    removeEventListener() {},
     appendChild(child) {
       child.parentElement = element;
       element.children.push(child);
@@ -127,7 +153,7 @@ function makeElement(tag = "div", attrs = {}) {
     querySelector: (selector) => descendants(element).find((n) => matches(n, selector)) ?? null,
     querySelectorAll: (selector) => descendants(element).filter((n) => matches(n, selector)),
     getBoundingClientRect: () => element.rect,
-  };
+  });
   return element;
 }
 
@@ -363,6 +389,41 @@ function liveFixture(body) {
   return row;
 }
 
+/**
+ * The page-level objects a send touches.
+ *
+ * Every assignment to `window.location.href` is kept, which is how a check
+ * tells a send from a click that did something else; so is every
+ * `window.open`. The document starts visible, and a check can hide it.
+ */
+function makePage(documentProps = {}) {
+  const navigations = [];
+  const opened = [];
+  const window = eventTarget({
+    location: {
+      get href() {
+        return navigations.at(-1) ?? "";
+      },
+      set href(value) {
+        navigations.push(value);
+      },
+    },
+    open: (...args) => {
+      opened.push(args);
+      return null;
+    },
+    // Deliberately useless: the style-adoption path has to cope with a
+    // reference button it can't measure.
+    getComputedStyle: () => ({
+      getPropertyValue: () => "",
+      backgroundColor: "",
+      borderRadius: "",
+    }),
+  });
+  const document = eventTarget({ visibilityState: "visible", ...documentProps });
+  return { window, document, navigations, opened };
+}
+
 function makeSandbox(hostname, pathname, fixture) {
   const body = makeElement("body");
   const head = makeElement("head");
@@ -372,8 +433,7 @@ function makeSandbox(hostname, pathname, fixture) {
 
   const extras = fixture ? fixture(body) : null;
   const logs = [];
-
-  const document = {
+  const { window, document, navigations, opened } = makePage({
     body,
     head,
     documentElement,
@@ -382,8 +442,7 @@ function makeSandbox(hostname, pathname, fixture) {
     querySelector: (selector) => body.querySelector(selector),
     querySelectorAll: (selector) => body.querySelectorAll(selector),
     getElementById: () => makeElement(),
-    addEventListener() {},
-  };
+  });
 
   const observers = [];
 
@@ -391,6 +450,8 @@ function makeSandbox(hostname, pathname, fixture) {
     logs,
     extras,
     observers,
+    navigations,
+    opened,
     sandbox: {
       document,
       location: {
@@ -399,17 +460,7 @@ function makeSandbox(hostname, pathname, fixture) {
         href: `https://${hostname}${pathname}`,
         origin: `https://${hostname}`,
       },
-      window: {
-        addEventListener() {},
-        location: { href: "" },
-        // Deliberately useless: the style-adoption path has to cope with a
-        // reference button it can't measure.
-        getComputedStyle: () => ({
-          getPropertyValue: () => "",
-          backgroundColor: "",
-          borderRadius: "",
-        }),
-      },
+      window,
       console: {
         info: (...args) => logs.push(args.join(" ")),
         warn: (...args) => logs.push(args.join(" ")),
@@ -444,11 +495,17 @@ function makeSandbox(hostname, pathname, fixture) {
 // fallback path, which is the one an empty page always ends on, never runs.
 const settle = () => new Promise((r) => setTimeout(r, 5000));
 
-async function run(file, hostname, pathname, fixture, { busy = false } = {}) {
+/** Starts a script in a fresh sandbox, without waiting for it to finish. */
+async function load(file, hostname, pathname, fixture) {
   const code = await readFile(join(root, "extension", "src", file), "utf8");
   const context = makeSandbox(hostname, pathname, fixture);
   vm.createContext(context.sandbox);
   new vm.Script(code, { filename: file }).runInContext(context.sandbox);
+  return context;
+}
+
+async function run(file, hostname, pathname, fixture, { busy = false } = {}) {
+  const context = await load(file, hostname, pathname, fixture);
   // A page that never goes quiet, the way chat replay on a Twitch VOD doesn't:
   // a mutation every 100ms, far inside the scan's 400ms debounce.
   const churn = busy
@@ -459,12 +516,280 @@ async function run(file, hostname, pathname, fixture, { busy = false } = {}) {
   return context;
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function expect(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+/** Polls until `probe` finds something, rather than guessing a delay. */
+async function until(probe, what, timeout = 3000) {
+  for (const start = Date.now(); Date.now() - start < timeout; await sleep(25)) {
+    const found = probe();
+    if (found) return found;
+  }
+  throw new Error(`gave up waiting for ${what}`);
+}
+
+/**
+ * Reads a timing constant out of the script under test.
+ *
+ * Copying the number in here would let the two drift apart, and a check that
+ * waits less than the script does fails for a reason that has nothing to do
+ * with the code.
+ */
+async function constant(file, name) {
+  const code = await readFile(join(root, "extension", "src", file), "utf8");
+  const match = code.match(new RegExp(`const ${name} = (\\d+);`));
+  if (!match) throw new Error(`${file} no longer declares ${name}`);
+  return Number(match[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Pressing the button.
+//
+// A send only counts once the app has answered, and the only answer a page can
+// see is its window coming forward — to the page, a blur. Before that, the
+// button turned green whether or not anything was installed to hear it.
+// ---------------------------------------------------------------------------
+
+const RELEASES = "https://github.com/BeeeFX/Nitrate/releases/latest";
+const STATES = ["is-sending", "is-done", "is-failed", "is-unanswered"];
+
+const stateOf = (button) => STATES.find((name) => button.classList.contains(name)) ?? "at rest";
+
+/** A clip page with its inline button in place, ready to be pressed. */
+async function clipPage() {
+  const page = await load("content.js", "www.twitch.tv", "/ludwig/clip/Something", clipFixture);
+  const button = await until(
+    () => page.extras.children.find((child) => child.hasAttribute(MARK)),
+    "the inline button",
+  );
+  return { ...page, button, window: page.sandbox.window, document: page.sandbox.document };
+}
+
+const PRESSING = {
+  async "button: a blur after sending counts as the app answering"() {
+    const { button, window, document, navigations } = await clipPage();
+
+    // Twice, because a second press mustn't leave the first one's listeners
+    // behind — each would flip the button on the same blur.
+    button.dispatch("click");
+    button.dispatch("click");
+    expect(
+      navigations.length === 2 && navigations.every((link) => link.startsWith("nitrate://add?url=")),
+      `expected two sends, got ${JSON.stringify(navigations)}`,
+    );
+    expect(stateOf(button) === "is-sending", `straight after the click it was ${stateOf(button)}`);
+    expect(
+      window.listenerCount("blur") === 1 && document.listenerCount("visibilitychange") === 1,
+      `two presses left ${window.listenerCount("blur")} blur listener(s) behind`,
+    );
+
+    window.dispatch("blur");
+    expect(stateOf(button) === "is-done", `after the blur it was ${stateOf(button)}`);
+    expect(window.listenerCount("blur") === 0, "still listening after the answer arrived");
+  },
+
+  async "button: silence reads as unanswered, and the next press offers the download"() {
+    const wait = await constant("content.js", "ANSWER_WINDOW");
+    const { button, window, navigations, opened } = await clipPage();
+
+    button.dispatch("click");
+    await sleep(wait + 150);
+    expect(stateOf(button) === "is-unanswered", `after ${wait}ms of silence it was ${stateOf(button)}`);
+    expect(
+      /didn't answer/.test(button.getAttribute("aria-label")),
+      `its name doesn't say what happened: ${button.getAttribute("aria-label")}`,
+    );
+
+    button.dispatch("click");
+    expect(navigations.length === 1, "the second press sent the link again");
+    expect(
+      opened.length === 1 && opened[0][0] === RELEASES && opened[0][2] === "noopener",
+      `wanted the releases page opened, got ${JSON.stringify(opened)}`,
+    );
+    expect(stateOf(button) === "at rest", `after offering the download it was ${stateOf(button)}`);
+    // Opening a tab hides this one, which would otherwise read as an answer.
+    expect(window.listenerCount("blur") === 0, "still listening after offering the download");
+  },
+
+  async "button: an answer after the verdict still counts"() {
+    const wait = await constant("content.js", "ANSWER_WINDOW");
+    const { button, document } = await clipPage();
+
+    button.dispatch("click");
+    await sleep(wait + 150);
+    expect(stateOf(button) === "is-unanswered", `after ${wait}ms of silence it was ${stateOf(button)}`);
+
+    // Hidden rather than blurred, so both routes are covered.
+    document.visibilityState = "hidden";
+    document.dispatch("visibilitychange");
+    expect(stateOf(button) === "is-done", `a late answer left it ${stateOf(button)}`);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// The toolbar and the right-click menu.
+//
+// background.js and shared.js are ES modules, which `vm` only runs behind an
+// experimental flag. So they're joined into one script with the import line
+// and the `export` keywords taken out; nothing else is touched, and the names
+// don't collide.
+// ---------------------------------------------------------------------------
+
+const TAB = { id: 7, url: "https://www.youtube.com/watch?v=abc" };
+const THROWAWAY = 99;
+
+function chromeEvent() {
+  const listeners = [];
+  return {
+    listeners,
+    addListener: (listener) => listeners.push(listener),
+    removeListener: (listener) => {
+      const at = listeners.indexOf(listener);
+      if (at !== -1) listeners.splice(at, 1);
+    },
+  };
+}
+
+/**
+ * Loads the background script against a stub browser.
+ *
+ * `scriptable: false` refuses every injection, as the PDF viewer and store
+ * pages do. `contextMenus: false` leaves the API out entirely, as Firefox for
+ * Android did.
+ */
+async function loadBackground({ contextMenus = true, scriptable = true } = {}) {
+  const read = (file) => readFile(join(root, "extension", "src", file), "utf8");
+  const code = [
+    (await read("shared.js")).replace(/^export /gm, ""),
+    (await read("background.js")).replace(/^import .*$/m, ""),
+  ].join("\n");
+
+  // The page the toolbar was pressed on, which the injected function runs in.
+  const page = makePage();
+  const record = { badges: [], titles: [], created: [], activated: [], removed: [] };
+
+  const chrome = {
+    runtime: {
+      onInstalled: chromeEvent(),
+      getManifest: () => ({ action: { default_title: "Send this page to Nitrate" } }),
+    },
+    action: {
+      onClicked: chromeEvent(),
+      setBadgeBackgroundColor: async () => {},
+      setBadgeText: async ({ text }) => void record.badges.push(text),
+      setTitle: async ({ title }) => void record.titles.push(title),
+    },
+    scripting: {
+      executeScript: async ({ func, args = [] }) => {
+        if (!scriptable) throw new Error("Cannot access contents of the page.");
+        return [{ result: await func(...args) }];
+      },
+    },
+    tabs: {
+      create: async (props) => {
+        record.created.push(props);
+        return { id: THROWAWAY, ...props };
+      },
+      get: async (id) => ({ id, active: true }),
+      update: async (id) => void record.activated.push(id),
+      remove: async (id) => void record.removed.push(id),
+    },
+    windows: { WINDOW_ID_NONE: -1, onFocusChanged: chromeEvent() },
+  };
+  if (contextMenus) {
+    chrome.contextMenus = { onClicked: chromeEvent(), removeAll: (done) => done?.(), create() {} };
+  }
+
+  const sandbox = {
+    chrome,
+    window: page.window,
+    document: page.document,
+    setTimeout,
+    clearTimeout,
+    URL,
+  };
+  vm.createContext(sandbox);
+  new vm.Script(code, { filename: "background.js" }).runInContext(sandbox);
+  return { chrome, record, ...page };
+}
+
+const press = (chrome) => chrome.action.onClicked.listeners[0](TAB);
+
+const TOOLBAR = {
+  async "background: a browser without context menus still gets the toolbar"() {
+    const { chrome } = await loadBackground({ contextMenus: false });
+    expect(chrome.action.onClicked.listeners.length === 1, "the toolbar listener was never registered");
+    for (const listener of chrome.runtime.onInstalled.listeners) listener();
+  },
+
+  async "toolbar: an answer shows a tick"() {
+    const { chrome, record, window, navigations } = await loadBackground();
+    const pending = press(chrome);
+    await until(() => navigations.length, "the link to be sent");
+    window.dispatch("blur");
+    await pending;
+    expect(record.badges.at(-1) === "✓", `the badge ended on ${JSON.stringify(record.badges.at(-1))}`);
+    expect(window.listenerCount("blur") === 0, "the injected function kept listening");
+  },
+
+  async "toolbar: silence shows a question mark, and says why"() {
+    const { chrome, record, navigations } = await loadBackground();
+    await press(chrome);
+    expect(navigations.length === 1, `expected one send, got ${navigations.length}`);
+    expect(record.badges.at(-1) === "?", `the badge ended on ${JSON.stringify(record.badges.at(-1))}`);
+    expect(
+      /didn't answer/.test(record.titles.at(-1)),
+      `the tooltip doesn't say why: ${JSON.stringify(record.titles.at(-1))}`,
+    );
+  },
+
+  async "toolbar: a page that refuses scripts is sent through a tab in front"() {
+    const { chrome, record } = await loadBackground({ scriptable: false });
+    const pending = press(chrome);
+    const [created] = await until(() => record.created.length && record.created, "a tab to open");
+    expect(
+      created.active === true && created.url.startsWith("nitrate://add?url="),
+      `wanted the link opened in front, got ${JSON.stringify(created)}`,
+    );
+    expect(record.removed.length === 0, "the tab closed before anyone could answer its prompt");
+
+    for (const listener of [...chrome.windows.onFocusChanged.listeners]) {
+      listener(chrome.windows.WINDOW_ID_NONE);
+    }
+    await pending;
+    expect(record.badges.at(-1) === "✓", `the badge ended on ${JSON.stringify(record.badges.at(-1))}`);
+    await until(() => record.removed.includes(THROWAWAY), "the throwaway tab to close");
+    expect(record.activated.includes(TAB.id), "the user wasn't handed back to their own tab");
+  },
+};
+
+/** Runs named checks side by side, collecting rather than throwing. */
+function runChecks(checks) {
+  return Promise.all(
+    Object.entries(checks).map(async ([name, check]) => {
+      try {
+        await check();
+        return { name };
+      } catch (error) {
+        return { name, error };
+      }
+    }),
+  );
+}
+
 async function main() {
   let failures = 0;
   const fail = (message) => {
     console.error(`  FAIL  ${message}`);
     failures += 1;
   };
+
+  // Started first and reported after the site passes: they wait on real
+  // timers too, and share nothing with anything else.
+  const pressing = runChecks({ ...PRESSING, ...TOOLBAR });
 
   // Concurrent because each one waits out the fallback delay, and the sandboxes
   // share nothing.
@@ -495,6 +820,11 @@ async function main() {
       continue;
     }
     console.log(`  ok    content.js on ${hostname}`);
+  }
+
+  for (const { name, error } of await pressing) {
+    if (error) fail(`${name}: ${error.message}`);
+    else console.log(`  ok    ${name}`);
   }
 
   // A reel feed keeps several reels alive at once. Every rail gets a button, or

@@ -88,7 +88,7 @@ WHAT IT DOES
 The button is styled to match each site's own controls, and can be set to show
 its mark alone if you'd rather it stayed quiet.
 
-That's the whole extension. It hands an address to a program on your own computer and stops there.
+That's the whole extension. It hands an address to a program on your own computer and stops there. If nothing answers — usually because the app isn't installed — the button turns amber instead of green, and clicking it again opens the download page.
 
 REQUIRES THE DESKTOP APP
 
@@ -164,7 +164,7 @@ Reads the address of the tab the user is currently on, so that address can be ha
 
 `scripting`
 ```
-Used solely to open a "nitrate://" link in the current tab, which is the mechanism that passes the URL to the desktop application. The injected function does nothing but set the location to that link. No page data is read, stored or modified.
+Used solely to open a "nitrate://" link in the current tab, which is the mechanism that passes the URL to the desktop application. The injected function sets the location to that link, then waits up to two and a half seconds for the page to lose focus — the desktop application coming to the front — so the toolbar icon can say whether the application answered. No page data is read, stored or modified.
 ```
 
 `storage`
@@ -302,6 +302,8 @@ This extension is a thin bridge to a desktop application. Its whole interface is
 
 HOW IT WORKS
 Clicking the button (or the context-menu entry) opens a "nitrate://" link in the current tab. That is a custom URL scheme registered by the Nitrate desktop application, which is what actually fetches and compresses the video. The extension's entire job is constructing that link and opening it.
+
+Browsers give no sign of whether anything handled the link, so the extension watches for the page losing focus over the next two and a half seconds — the application brings its window forward when it receives a link. If that doesn't happen, the button (or the toolbar badge) says the application didn't answer, and a second click on the button opens the application's download page on GitHub in a new tab. On a page that doesn't accept injected scripts, such as the PDF viewer, the link is opened in a new tab instead, which closes once the application has answered or after fifteen seconds.
 
 SOURCE CODE
 Not minified, obfuscated or transpiled. The files in the package are the files in the repository, byte for byte:

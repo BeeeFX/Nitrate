@@ -11,6 +11,8 @@ const MENU_LINK = "nitrate-send-link";
 const MENU_PAGE = "nitrate-send-page";
 const MENU_VIDEO = "nitrate-send-video";
 
+const UNANSWERED_TITLE = "Nitrate didn't answer — is the app installed and running?";
+
 chrome.runtime.onInstalled.addListener(() => {
   if (!chrome.contextMenus) return;
   chrome.contextMenus.removeAll(() => {
@@ -67,9 +69,18 @@ async function deliver(url, tabId) {
     await flashBadge("!", "#ED4245");
     return;
   }
+  // The verdict takes a couple of seconds to arrive, and the old instant tick
+  // was only ever a guess. Something has to show in the meantime, or the click
+  // looks ignored; whichever badge comes next replaces this one.
+  await flashBadge("…", "#5865F2", { hold: 10000 });
   try {
-    await sendToApp(url, tabId);
-    await flashBadge("✓", "#43B581");
+    if (await sendToApp(url, tabId)) {
+      await flashBadge("✓", "#43B581");
+    } else {
+      // Not an error — the link went out fine, and nothing took it. Held long
+      // enough to hover over and read why.
+      await flashBadge("?", "#FAA61A", { title: UNANSWERED_TITLE, hold: 8000 });
+    }
   } catch {
     await flashBadge("!", "#ED4245");
   }

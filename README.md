@@ -191,9 +191,12 @@ Three ways to send something, whichever suits the moment:
 Nitrate opens with the video already on its way, and from there it's the app you
 already know — pick a size, or trim out the bit you wanted.
 
-It needs the desktop app above; on its own the extension does nothing. All it
-ever does is hand over an address, to a program on the same machine. It can't
-read the pages you visit, stores nothing and sends nothing anywhere — the
+It needs the desktop app above; on its own the extension does nothing. If the
+button turns amber rather than green, nothing answered — click it again for the
+download page.
+
+All it ever does is hand over an address, to a program on the same machine. It
+can't read the pages you visit, stores nothing and sends nothing anywhere — the
 policy is in [PRIVACY.md](PRIVACY.md), and every line it runs is in
 [`extension/`](extension).
 

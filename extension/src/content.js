@@ -31,6 +31,21 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 /** Instagram's private messages, which need handling of their own. */
 const IG_DIRECT = /^\/direct\//;
 
+// How long the app gets to take focus before a send is called unanswered; how
+// long the button then says so; and how late an answer can arrive and still
+// count. The last is generous because the first send from a site sits behind
+// the browser's own "Open Nitrate?" prompt, and reading that takes a moment.
+// `shared.js` waits the same 2.5 seconds for the toolbar and the menu.
+const ANSWER_WINDOW = 2500;
+const UNANSWERED_FOR = 8000;
+const LATE_ANSWER = 15000;
+
+const DOWNLOAD_URL = "https://github.com/BeeeFX/Nitrate/releases/latest";
+const IDLE_TITLE = "Send to Nitrate";
+const UNANSWERED_TITLE =
+  "Nitrate didn't answer — is the app installed and running? Click again to download it.";
+const STATES = ["is-sending", "is-done", "is-failed", "is-unanswered"];
+
 /**
  * The mark, built as elements rather than parsed from a string.
  *
@@ -295,10 +310,10 @@ function makeButton(getUrl) {
   button.className = "nitrate-send";
   button.dataset.site = site.id;
   button.type = "button";
-  button.title = "Send to Nitrate";
-  // The tooltip isn't announced, so the name has to be here too — otherwise
-  // the mark-only button reads as an unlabelled button to a screen reader.
-  button.setAttribute("aria-label", "Send to Nitrate");
+  // Sets the tooltip and, since the tooltip isn't announced, the accessible
+  // name too — otherwise the mark-only button reads as an unlabelled button to
+  // a screen reader.
+  setState(button, null);
 
   button.append(markSvg());
   if (wantsLabel()) {
@@ -308,11 +323,25 @@ function makeButton(getUrl) {
     button.append(label);
   }
 
+  // Whatever the last send is still waiting on. Replaced on every click, so a
+  // second send cancels the first's listeners rather than piling up beside them.
+  let stopWaiting = () => {};
+
   button.addEventListener("click", (event) => {
     // Feeds wrap posts in giant click targets; without this, sending a link
     // also opens the post.
     event.preventDefault();
     event.stopPropagation();
+    stopWaiting();
+
+    // Sending again into the same silence would only get the same silence. Once
+    // the button has said nothing answered, the next click is someone taking it
+    // up on the offer in its tooltip.
+    if (button.classList.contains("is-unanswered")) {
+      setState(button, null);
+      window.open(DOWNLOAD_URL, "_blank", "noopener");
+      return;
+    }
 
     const url = getUrl();
     let ok = false;
@@ -333,11 +362,82 @@ function makeButton(getUrl) {
       ok = false;
     }
 
-    button.classList.add(ok ? "is-done" : "is-failed");
-    setTimeout(() => button.classList.remove("is-done", "is-failed"), 1600);
+    stopWaiting = ok ? awaitAnswer(button) : flash(button, "is-failed");
   });
 
   return button;
+}
+
+/**
+ * Puts the button in one state, or at rest with `null`.
+ *
+ * The tooltip and the accessible name follow along, because an amber mark on
+ * its own doesn't say what went wrong or what clicking again will do.
+ */
+function setState(button, state) {
+  for (const name of STATES) button.classList.remove(name);
+  if (state) button.classList.add(state);
+
+  const title = state === "is-unanswered" ? UNANSWERED_TITLE : IDLE_TITLE;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+}
+
+/** Shows a state briefly, then rests. Returns a cancel for the fade. */
+function flash(button, state) {
+  setState(button, state);
+  const timer = setTimeout(() => setState(button, null), 1600);
+  return () => clearTimeout(timer);
+}
+
+/**
+ * Waits to find out whether anything picked the link up.
+ *
+ * A page can't ask whether a protocol has a handler, or whether it ran. When
+ * nothing is registered, Chrome logs "no registered handler" to a console
+ * nobody is watching and Firefox blocks the navigation just as quietly — and
+ * the button used to turn green either way, claiming a success nobody had
+ * seen. What a page *can* see is losing focus. Nitrate brings its window
+ * forward whenever it's handed a link, so a blur soon after sending is the app
+ * answering. So, sometimes, is the browser's own "Open Nitrate?" prompt taking
+ * focus — but that only appears when something has registered the scheme, so
+ * it still means the app is there.
+ *
+ * The tab going hidden counts too. It's the same answer by another route: a
+ * browser the app's window covers completely may report it that way instead.
+ *
+ * Returns a cancel that drops every listener and timer, which the next click
+ * calls before it starts.
+ */
+function awaitAnswer(button) {
+  const timers = [];
+
+  function stop() {
+    window.removeEventListener("blur", answered);
+    document.removeEventListener("visibilitychange", hidden);
+    for (const timer of timers.splice(0)) clearTimeout(timer);
+  }
+  function answered() {
+    stop();
+    setState(button, "is-done");
+    timers.push(setTimeout(() => setState(button, null), 1600));
+  }
+  function hidden() {
+    if (document.visibilityState === "hidden") answered();
+  }
+
+  setState(button, "is-sending");
+  window.addEventListener("blur", answered);
+  document.addEventListener("visibilitychange", hidden);
+
+  timers.push(
+    setTimeout(() => setState(button, "is-unanswered"), ANSWER_WINDOW),
+    setTimeout(() => setState(button, null), ANSWER_WINDOW + UNANSWERED_FOR),
+    // Past this, a blur is someone switching windows, not the app arriving.
+    setTimeout(stop, LATE_ANSWER),
+  );
+
+  return stop;
 }
 
 /**
@@ -948,6 +1048,14 @@ const STYLE_TEXT = `
     .nitrate-send.is-done .nitrate-icon { color: #43B581; }
     .nitrate-send.is-failed { background: rgba(237,66,69,.25); }
     .nitrate-send.is-failed .nitrate-icon { color: #ED4245; }
+    /* Sent, and waiting to hear whether anything took it. Deliberately quiet:
+       usually the app answers within a second and this is gone before it
+       registers. */
+    .nitrate-send.is-sending { opacity: .55; cursor: progress; }
+    /* Nothing answered. Amber rather than red, because nothing broke — there
+       was just nobody there to hear it. */
+    .nitrate-send.is-unanswered { background: rgba(250,166,26,.25); }
+    .nitrate-send.is-unanswered .nitrate-icon { color: #FAA61A; }
 
     /* No label means a circle, not a stubby pill. */
     .nitrate-send:not(:has(.nitrate-label)) { width: 32px; padding: 0; }
@@ -1015,6 +1123,7 @@ const STYLE_TEXT = `
     }
     .nitrate-send[data-site="youtube"].is-done .nitrate-icon { color: #43B581; }
     .nitrate-send[data-site="youtube"].is-failed .nitrate-icon { color: #ED4245; }
+    .nitrate-send[data-site="youtube"].is-unanswered .nitrate-icon { color: #FAA61A; }
 
     /* Instagram's controls are bare outline icons on the page background. */
     .nitrate-send[data-site="instagram"] {
@@ -1083,6 +1192,13 @@ const STYLE_TEXT = `
     }
     .nitrate-send.nitrate-floating .nitrate-icon { color: #fff; }
     .nitrate-send.nitrate-floating:hover { background: #6b76f5; }
+    /* The corner button's own blurple and white outrank the state colours
+       above, which left it looking the same whatever had happened. It's the
+       one button that's already a solid colour, so its states are too. */
+    .nitrate-send.nitrate-floating.is-done { background: #43B581; }
+    .nitrate-send.nitrate-floating.is-failed { background: #ED4245; }
+    .nitrate-send.nitrate-floating.is-unanswered { background: #FAA61A; color: #1e1f22; }
+    .nitrate-send.nitrate-floating.is-unanswered .nitrate-icon { color: #1e1f22; }
 `;
 
 function injectStyles() {
