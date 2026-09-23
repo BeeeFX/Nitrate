@@ -7,6 +7,7 @@ pub mod download;
 pub mod encode;
 pub mod ffmpeg;
 pub mod media;
+pub mod signature;
 mod tray;
 
 use base64::Engine as _;

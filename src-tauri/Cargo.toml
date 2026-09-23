@@ -40,6 +40,8 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 tauri-plugin-drag = "2.1.1"
 sha2 = "0.10.9"
+# The RSA step of checking yt-dlp's release signature. See `signature.rs`.
+num-bigint = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 # Ending a helper's whole process group on cancel. Already in the tree.
