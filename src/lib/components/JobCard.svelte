@@ -297,7 +297,11 @@
 
     <div class="actions">
       {#if waiting}
-        <button class="act go" onclick={() => app.start(job.id)} title="Compress it anyway">
+        <button
+          class="act go"
+          onclick={() => app.start(job.id)}
+          title={job.heldReason === "long" ? "Compress it anyway" : "Compress"}
+        >
           <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor" /></svg>
         </button>
       {:else if working}
@@ -404,7 +408,7 @@
         start, or turn it on in settings.
       </span>
     </p>
-  {:else if waiting}
+  {:else if waiting && job.heldReason === "long"}
     <p class="hold">
       <svg viewBox="0 0 24 24" aria-hidden="true"
         ><path

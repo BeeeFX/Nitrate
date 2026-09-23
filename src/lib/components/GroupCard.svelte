@@ -74,9 +74,11 @@
       Math.max(1, items.length),
   );
 
+  // Waiting items only. A queued one is already with Rust, and sending it
+  // again encoded it twice under one id — neither copy cancellable after.
   function compressAll() {
     for (const job of items) {
-      if (job.status === "queued" || job.status === "held") void app.start(job.id);
+      if (job.status === "held") void app.start(job.id);
     }
   }
 
@@ -129,7 +131,7 @@
     </button>
 
     <div class="acts">
-      {#if anythingToCompress && items.some((j) => j.status === "queued" || j.status === "held")}
+      {#if anythingToCompress && items.some((j) => j.status === "held")}
         <button class="act" onclick={compressAll} title="Compress all of them">
           <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" fill="currentColor" /></svg>
         </button>

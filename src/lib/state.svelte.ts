@@ -595,7 +595,16 @@ class AppStore {
         }
 
         job.stage = "Ready";
-        if (this.autoStart) await this.start(job.id);
+        if (this.autoStart) {
+          await this.start(job.id);
+        } else {
+          // Held, not left as "queued". Queued means Rust has it, so a job
+          // left there showed a Cancel button with nothing to cancel, no way
+          // to start it, and kept "1 in progress" — and the update's Restart
+          // — waiting on it forever.
+          job.status = "held";
+          job.heldReason = "manual";
+        }
       } catch (err) {
         job.status = "failed";
         job.stage = "Failed";
@@ -639,18 +648,25 @@ class AppStore {
     }
   }
 
-  /** Re-previews every idle job after a settings change. */
+  /**
+   * Re-previews every idle job after a settings change.
+   *
+   * Held jobs only: a queued one has already been sent with the settings it
+   * had, so a fresh plan would describe an encode that isn't going to happen.
+   */
   async refreshPlans() {
     await Promise.all(
       this.jobs
-        .filter((j) => j.status === "queued" && j.info)
+        .filter((j) => j.status === "held" && j.info)
         .map((j) => this.#loadPlan(j)),
     );
   }
 
   async start(id: string) {
     const job = this.#find(id);
-    if (!job) return;
+    // Sending a running job again would encode it twice, and Rust would lose
+    // the first copy's cancel flag in the process.
+    if (!job || job.status === "running") return;
 
     job.status = "queued";
     job.heldReason = null;
@@ -689,7 +705,7 @@ class AppStore {
 
   async startAll() {
     for (const job of this.jobs) {
-      if (job.status === "queued" || job.status === "failed" || job.status === "cancelled") {
+      if (job.status === "held" || job.status === "failed" || job.status === "cancelled") {
         await this.start(job.id);
       }
     }

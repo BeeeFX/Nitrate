@@ -72,6 +72,15 @@ class Updater {
     }
   }
 
+  /**
+   * Fetches the update, but doesn't install it.
+   *
+   * On Windows, installing launches the installer and exits on the spot —
+   * the plugin calls `process::exit` itself — so `downloadAndInstall` here
+   * killed every encode in flight the moment Update was pressed, long before
+   * the banner could say "finish encoding first". Installing waits for
+   * `restart`, which is only offered once the queue is empty.
+   */
   async install() {
     if (!this.#update) return;
 
@@ -82,7 +91,7 @@ class Updater {
     let received = 0;
 
     try {
-      await this.#update.downloadAndInstall((event) => {
+      await this.#update.download((event) => {
         switch (event.event) {
           case "Started":
             total = event.data.contentLength ?? 0;
@@ -106,6 +115,14 @@ class Updater {
   }
 
   async restart() {
+    try {
+      // Returns only where installing doesn't exit the app for us.
+      await this.#update?.install();
+    } catch (err) {
+      this.status = "error";
+      this.error = String(err);
+      return;
+    }
     await relaunch();
   }
 
