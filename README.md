@@ -195,9 +195,11 @@ It needs the desktop app above; on its own the extension does nothing. If the
 button turns amber rather than green, nothing answered — click it again for the
 download page.
 
-All it ever does is hand over an address, to a program on the same machine. It
-can't read the pages you visit, stores nothing and sends nothing anywhere — the
-policy is in [PRIVACY.md](PRIVACY.md), and every line it runs is in
+All it ever does is hand over an address, to a program on the same machine. On
+the five sites above it looks at the page only to find where its button goes
+and which post's address to send; it remembers one setting, how the button
+looks; and it sends nothing anywhere — the policy is in
+[PRIVACY.md](PRIVACY.md), and every line it runs is in
 [`extension/`](extension).
 
 Rather not install anything? Copying a link and pressing
