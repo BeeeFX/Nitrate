@@ -244,6 +244,7 @@ pub fn ensure_quickjs(data_dir: &Path) -> Result<PathBuf, String> {
 }
 
 fn base_command(program: &Path) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);

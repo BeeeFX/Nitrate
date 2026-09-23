@@ -1010,8 +1010,8 @@ fn build_args(
     }
 
     // H.265 in MP4 needs the hvc1 tag or most players refuse it.
-    if settings.container == Container::Mp4 && plan.encoder.contains("265")
-        || settings.container == Container::Mp4 && plan.encoder.contains("hevc")
+    if settings.container == Container::Mp4
+        && (plan.encoder.contains("265") || plan.encoder.contains("hevc"))
     {
         args.extend([s("-tag:v"), s("hvc1")]);
     }
