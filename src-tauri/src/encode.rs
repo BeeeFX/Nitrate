@@ -401,26 +401,20 @@ pub fn plan(
     let total_kbps = usable_bits / 1000.0 / duration;
 
     // Audio comes off the top — it's effectively fixed cost.
-    let mut audio_kbps = match settings.audio_codec {
-        AudioCodec::None => 0,
-        AudioCodec::Copy => info
-            .audio_bitrate_kbps
-            .unwrap_or(settings.audio_bitrate_kbps),
-        _ => settings.audio_bitrate_kbps,
-    };
-    if !info.has_audio() {
-        audio_kbps = 0;
-    }
+    let route = audio_route(settings, info, &mut notes);
+    let mut audio_kbps = audio_budget(route, settings, info);
 
     // On very tight targets, a fixed 128k audio track can eat the whole budget.
     // Shrinking audio is far less visible than starving the video.
-    let audio_floor = match settings.audio_codec {
+    let audio_floor = match route {
         AudioCodec::Opus => 32,
         _ => 48,
     };
     if audio_kbps > 0 && (total_kbps - audio_kbps as f64) < MIN_VIDEO_KBPS * 2.0 {
-        let squeezed = ((total_kbps * 0.25) as u32).clamp(audio_floor, audio_kbps);
-        if squeezed < audio_kbps && settings.audio_codec != AudioCodec::Copy {
+        // A copied track can already sit below the floor — a 32k voice memo —
+        // and `clamp` panics when its minimum passes its maximum.
+        let squeezed = ((total_kbps * 0.25) as u32).clamp(audio_floor.min(audio_kbps), audio_kbps);
+        if squeezed < audio_kbps && route != AudioCodec::Copy {
             notes.push(format!(
                 "Audio dropped to {squeezed} kbps to protect the video."
             ));
@@ -476,13 +470,14 @@ pub fn plan(
                 None => break,
             }
         }
-        if height < source_height {
+        if height < even_floor(source_height) {
             notes.push(format!(
                 "Downscaled to {height}p to keep the picture clean."
             ));
         }
     }
 
+    let height = even_floor(height);
     let width = scaled_width(source_width, source_height, height);
 
     let encoder = pick_encoder(settings, bins, &mut notes);
@@ -496,12 +491,76 @@ pub fn plan(
         height,
         fps,
         encoder,
-        downscaled: height < source_height,
+        downscaled: height < even_floor(source_height),
         // The target is the estimate in this mode.
         estimated_bytes: None,
         copy_streams: false,
         notes,
     })
+}
+
+/// How tall a download is worth fetching, for what it's about to become.
+///
+/// A ten-minute video squeezed into 10 MB comes out around 360p, but was
+/// fetched at 1080p every time — five to ten times the bandwidth, spent on
+/// pixels the encode then throws away. When the download goes straight into
+/// a size-targeted encode, the height comes from the same bits-per-pixel
+/// floor the planner uses, one rung higher for headroom: that estimate
+/// assumes 16:9 at 30 fps, and scaling down from a little more detail looks
+/// better than from exactly enough.
+///
+/// Anything that isn't about to be squeezed — quality or keep mode, a link
+/// held back for trimming, a length nobody knows — gets the full ceiling.
+pub fn download_height(settings: &Settings, duration: Option<f64>) -> u32 {
+    let ceiling = settings.max_download_height.max(144);
+    let Some(duration) = duration.filter(|d| *d > 0.0) else {
+        return ceiling;
+    };
+    if settings.mode != TargetMode::Size || !settings.auto_compress_downloads {
+        return ceiling;
+    }
+
+    let margin = settings.safety_margin.clamp(0.5, 0.999);
+    let total_kbps = settings.target_bytes as f64 * 8.0 * margin / 1000.0 / duration;
+    let audio_kbps = match settings.audio_codec {
+        AudioCodec::None => 0.0,
+        _ => settings.audio_bitrate_kbps as f64,
+    };
+    let video_kbps = total_kbps * 0.99 - audio_kbps;
+    let carries = |h: u32| {
+        let pixels = h as f64 * (h as f64 * 16.0 / 9.0) * 30.0;
+        video_kbps * 1000.0 / pixels >= settings.video_codec.min_bpp()
+    };
+
+    let lowest = *LADDER.last().unwrap_or(&180);
+    let fits = LADDER
+        .iter()
+        .copied()
+        .find(|&h| carries(h))
+        .unwrap_or(lowest);
+    let with_headroom = LADDER
+        .iter()
+        .copied()
+        .rev()
+        .find(|&h| h > fits)
+        .unwrap_or(fits);
+    with_headroom.max(360).min(ceiling)
+}
+
+/// Fills in a copied audio track's bitrate when the file doesn't state one.
+///
+/// Call between probing and planning. It's a pass over the file, so only
+/// done when the audio really is going to be copied.
+pub fn measure_copied_audio(
+    bins: &Binaries,
+    input: &Path,
+    info: &mut MediaInfo,
+    settings: &Settings,
+) {
+    let copying = settings.audio_codec == AudioCodec::Copy || settings.mode == TargetMode::Keep;
+    if copying && info.has_audio() && info.audio_bitrate_kbps.is_none() {
+        info.audio_bitrate_kbps = ffmpeg::measure_audio_kbps(bins, input, info.duration);
+    }
 }
 
 /// Chooses the encoder, falling back to software when the GPU can't help.
@@ -554,10 +613,12 @@ fn plan_by_quality(
     }
 
     let source_height = source_height.max(1);
-    let height = settings
-        .max_height
-        .unwrap_or(source_height)
-        .min(source_height);
+    let height = even_floor(
+        settings
+            .max_height
+            .unwrap_or(source_height)
+            .min(source_height),
+    );
     let width = scaled_width(source_width, source_height, height);
 
     let encoder = pick_encoder(settings, bins, &mut notes);
@@ -567,7 +628,7 @@ fn plan_by_quality(
         "Encoding at {} quality — the size lands wherever it lands.",
         settings.quality.label()
     ));
-    if height < source_height {
+    if height < even_floor(source_height) {
         notes.push(format!("Capped at {height}p."));
     }
     notes.push(
@@ -576,16 +637,8 @@ fn plan_by_quality(
             .into(),
     );
 
-    let audio_kbps = if info.has_audio() && settings.audio_codec != AudioCodec::None {
-        match settings.audio_codec {
-            AudioCodec::Copy => info
-                .audio_bitrate_kbps
-                .unwrap_or(settings.audio_bitrate_kbps),
-            _ => settings.audio_bitrate_kbps,
-        }
-    } else {
-        0
-    };
+    let route = audio_route(settings, info, &mut notes);
+    let audio_kbps = audio_budget(route, settings, info);
 
     let estimated_bytes = estimate_quality_bytes(
         settings.video_codec,
@@ -606,7 +659,7 @@ fn plan_by_quality(
         height,
         fps,
         encoder,
-        downscaled: height < source_height,
+        downscaled: height < even_floor(source_height),
         estimated_bytes,
         copy_streams: false,
         notes,
@@ -644,7 +697,10 @@ fn plan_by_keeping(
         .max_height
         .is_some_and(|cap| cap < source_height.max(1))
         || settings.max_fps.is_some_and(|cap| cap < info.fps);
-    let copy_streams = !crops && !capped;
+    // Copying keeps the codec, so the container has to be able to hold it —
+    // H.264 can't go into WebM however little else changes.
+    let fits = video_fits(settings.container, &info.video_codec);
+    let copy_streams = !crops && !capped && fits;
 
     let duration = edits.duration(info.duration);
 
@@ -661,14 +717,22 @@ fn plan_by_keeping(
         }
     } else if crops {
         notes.push("Cropping means re-encoding, so this runs at near-lossless quality.".into());
+    } else if !fits {
+        notes.push(format!(
+            "{} video can't go into {} as it is, so it's re-encoded at near-lossless quality.",
+            info.video_codec.to_uppercase(),
+            settings.container.extension().to_uppercase()
+        ));
     } else {
         notes.push("Re-encoding at near-lossless quality to apply the caps you set.".into());
     }
 
-    let height = settings
-        .max_height
-        .unwrap_or(source_height)
-        .min(source_height.max(1));
+    let height = even_floor(
+        settings
+            .max_height
+            .unwrap_or(source_height)
+            .min(source_height.max(1)),
+    );
     let width = scaled_width(source_width, source_height.max(1), height);
 
     let fps = match settings.max_fps {
@@ -676,9 +740,13 @@ fn plan_by_keeping(
         _ => info.fps,
     };
 
-    // Audio is never re-encoded here; there's no reason to when the point is to
-    // leave the material as it was.
-    let audio_kbps = info.audio_bitrate_kbps.unwrap_or(0);
+    // Audio is copied too, unless the container can't hold it — a camera's PCM
+    // track can't go into an MP4 — in which case it's re-encoded and said so.
+    let route = keep_audio_route(settings, info, &mut notes);
+    let audio_kbps = match route {
+        AudioCodec::Copy => info.audio_bitrate_kbps.unwrap_or(0),
+        other => audio_budget(other, settings, info),
+    };
 
     // Copying keeps the source's own bitrate, so the size follows from how much
     // of the clip is left. That's arithmetic rather than a guess, unlike the
@@ -706,7 +774,7 @@ fn plan_by_keeping(
         } else {
             pick_encoder(settings, bins, &mut notes)
         },
-        downscaled: height < source_height,
+        downscaled: height < even_floor(source_height),
         estimated_bytes,
         copy_streams,
         notes,
@@ -714,13 +782,115 @@ fn plan_by_keeping(
 }
 
 /// Keeps the aspect ratio and forces an even width, which every codec requires.
+///
+/// Rounded the way ffmpeg's `scale=-2:h` rounds — to the nearest multiple of
+/// two — so the plan describes the file that actually comes out.
 fn scaled_width(source_width: u32, source_height: u32, height: u32) -> u32 {
     if source_height == 0 || source_width == 0 {
         return 0;
     }
     let ratio = source_width as f64 / source_height as f64;
-    even(height as f64 * ratio)
+    ((height as f64 * ratio / 2.0).round() as u32 * 2).max(2)
 }
+
+/// Heights are even too. A source odd in both directions — 853x481 — planned
+/// its own 481 as the target, and `scale=-2:481` is a height x264 refuses.
+fn even_floor(height: u32) -> u32 {
+    (height & !1).max(2)
+}
+
+/// Whether a container can carry this video codec without re-encoding it.
+fn video_fits(container: Container, codec: &str) -> bool {
+    match container {
+        Container::Mkv => true,
+        Container::Webm => matches!(codec, "vp8" | "vp9" | "av1"),
+        Container::Mp4 => matches!(codec, "h264" | "hevc" | "av1" | "vp9" | "mpeg4"),
+    }
+}
+
+/// Whether a container can carry this audio codec as it is.
+fn audio_fits(container: Container, codec: &str) -> bool {
+    match container {
+        Container::Mkv => true,
+        Container::Webm => matches!(codec, "opus" | "vorbis"),
+        Container::Mp4 => matches!(
+            codec,
+            "aac" | "mp3" | "ac3" | "eac3" | "opus" | "flac" | "alac"
+        ),
+    }
+}
+
+/// The codec to re-encode into when copying isn't possible.
+fn native_audio(container: Container) -> AudioCodec {
+    if container == Container::Webm {
+        AudioCodec::Opus
+    } else {
+        AudioCodec::Aac
+    }
+}
+
+/// What the audio actually becomes.
+///
+/// "Copy" is a request, not a promise. AAC — the audio in nearly every MP4 —
+/// can't go into WebM, and asking ffmpeg to put it there failed the whole
+/// encode, so a track the container can't hold is re-encoded and the card
+/// says so.
+fn audio_route(settings: &Settings, info: &MediaInfo, notes: &mut Vec<String>) -> AudioCodec {
+    if !info.has_audio() {
+        return AudioCodec::None;
+    }
+    match settings.audio_codec {
+        AudioCodec::Copy => copy_or_convert(settings.container, info, notes),
+        other => other,
+    }
+}
+
+/// Keep mode copies audio whatever the setting says, where it can.
+fn keep_audio_route(settings: &Settings, info: &MediaInfo, notes: &mut Vec<String>) -> AudioCodec {
+    if !info.has_audio() {
+        return AudioCodec::None;
+    }
+    copy_or_convert(settings.container, info, notes)
+}
+
+fn copy_or_convert(container: Container, info: &MediaInfo, notes: &mut Vec<String>) -> AudioCodec {
+    let codec = info.audio_codec.as_deref().unwrap_or("");
+    if audio_fits(container, codec) {
+        return AudioCodec::Copy;
+    }
+    let instead = native_audio(container);
+    notes.push(format!(
+        "{} audio can't go into {} as it is, so it's re-encoded as {}.",
+        codec.to_uppercase(),
+        container.extension().to_uppercase(),
+        if instead == AudioCodec::Opus {
+            "Opus"
+        } else {
+            "AAC"
+        }
+    ));
+    instead
+}
+
+/// The bitrate the audio will spend, for the budget.
+fn audio_budget(route: AudioCodec, settings: &Settings, info: &MediaInfo) -> u32 {
+    match route {
+        AudioCodec::None => 0,
+        AudioCodec::Copy => info
+            .audio_bitrate_kbps
+            .unwrap_or(settings.audio_bitrate_kbps),
+        _ => settings.audio_bitrate_kbps,
+    }
+}
+
+/// HDR to SDR, for sources that are PQ or HLG.
+///
+/// Squeezing HDR into 8-bit without mapping it just relabels the numbers: the
+/// result is flat and washed out on every ordinary screen, which is all of
+/// them as far as a Discord embed is concerned. Linear light, Hable's curve,
+/// then back to BT.709.
+const TONEMAP: &str = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,\
+                       tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
 
 fn format_duration(secs: f64) -> String {
     let total = secs.round() as u64;
@@ -788,6 +958,22 @@ fn numeric_preset(preset: &str, min: u32, max: u32, fallback: u32) -> String {
 /// Builds the argument list for one ffmpeg pass.
 ///
 /// `pass` is `None` for a single-pass encode, or `Some(1 | 2)` for two-pass.
+/// The audio encoder arguments for AAC or Opus.
+fn push_audio_encode(args: &mut Vec<String>, codec: AudioCodec, kbps: u32, info: &MediaInfo) {
+    if codec == AudioCodec::Opus {
+        args.extend([s("-c:a"), s("libopus")]);
+        // libopus refuses 5.1(side), the layout most AC3 tracks arrive in, so
+        // anything beyond stereo is downmixed, as it already was for AAC.
+        if info.audio_channels.unwrap_or(2) > 2 {
+            args.extend([s("-ac"), s("2")]);
+        }
+    } else {
+        // Downmix to stereo; surround sources waste bitrate Discord won't play back.
+        args.extend([s("-c:a"), s("aac"), s("-ac"), s("2")]);
+    }
+    args.extend([s("-b:a"), format!("{}k", kbps.max(32))]);
+}
+
 fn build_args(
     task: &Task,
     output: &Path,
@@ -827,7 +1013,17 @@ fn build_args(
     // No filters, no codec settings, no second pass — none of it applies when
     // the packets aren't being decoded in the first place.
     if plan.copy_streams {
-        args.extend([s("-c"), s("copy"), s("-map"), s("0")]);
+        // The picture and the sound, and nothing else. `-map 0` took every
+        // stream in the file, and an MKV's subtitles or an iPhone's timecode
+        // and metadata tracks have no place in an MP4 — ffmpeg refused the
+        // whole copy over them.
+        args.extend([s("-map"), s("0:v:0"), s("-map"), s("0:a?")]);
+        args.extend([s("-c:v"), s("copy")]);
+        match keep_audio_route(settings, info, &mut Vec::new()) {
+            AudioCodec::Copy | AudioCodec::None => args.extend([s("-c:a"), s("copy")]),
+            other => push_audio_encode(&mut args, other, plan.audio_kbps, info),
+        }
+        args.extend([s("-sn"), s("-dn")]);
         // Timestamps start wherever the keyframe was, and some players show a
         // clip that begins at 0:47 as being 47 seconds long with a blank start.
         args.extend([s("-avoid_negative_ts"), s("make_zero")]);
@@ -856,7 +1052,15 @@ fn build_args(
         if !filters.is_empty() {
             args.extend([s("-vf"), filters.join(",")]);
         }
-        args.extend([s("-frames:v"), s("1"), s("-q:v"), s("2")]);
+        args.extend([s("-frames:v"), s("1")]);
+        // Each image encoder reads quality its own way. `-q:v 2` is near the
+        // top for JPEG, but libwebp takes it as 2 out of 100 — which is how a
+        // cropped WebP came back a third the size and visibly smeared.
+        match still_extension(input) {
+            Some("jpg") => args.extend([s("-q:v"), s("2")]),
+            Some("webp") => args.extend([s("-quality"), s("90")]),
+            _ => {}
+        }
         args.push(output.to_string_lossy().into_owned());
         return args;
     }
@@ -865,6 +1069,10 @@ fn build_args(
     }
     if (plan.fps - info.fps).abs() > 0.01 {
         filters.push(format!("fps={:.3}", plan.fps));
+    }
+    // After scaling, so the expensive part runs on the smaller frame.
+    if info.is_hdr() {
+        filters.push(TONEMAP.split_whitespace().collect());
     }
 
     // A GIF that reaches here was edited, and it comes back a GIF.
@@ -911,16 +1119,23 @@ fn build_args(
         Some(crf) => {
             if is_hardware_encoder {
                 // Each vendor spells constant quality differently.
-                let flag = if plan.encoder.contains("nvenc") {
-                    "-cq"
-                } else if plan.encoder.contains("qsv") {
-                    "-global_quality"
-                } else {
-                    "-qp"
-                };
-                args.extend([s(flag), crf.to_string()]);
                 if plan.encoder.contains("nvenc") {
+                    args.extend([s("-cq"), crf.to_string()]);
                     args.extend([s("-rc"), s("vbr"), s("-b:v"), s("0")]);
+                } else if plan.encoder.contains("qsv") {
+                    args.extend([s("-global_quality"), crf.to_string()]);
+                } else if plan.encoder.contains("amf") {
+                    // AMF has no `-qp`: ffmpeg only warned that it went
+                    // unused, and the encode quietly ran at the encoder's
+                    // default rate control instead. It takes one per frame
+                    // type, and HEVC has no B-frames to set.
+                    args.extend([s("-rc"), s("cqp")]);
+                    args.extend([s("-qp_i"), crf.to_string(), s("-qp_p"), crf.to_string()]);
+                    if !plan.encoder.contains("hevc") {
+                        args.extend([s("-qp_b"), crf.to_string()]);
+                    }
+                } else {
+                    args.extend([s("-qp"), crf.to_string()]);
                 }
             } else {
                 args.extend([s("-crf"), crf.to_string()]);
@@ -1008,16 +1223,32 @@ fn build_args(
     }
 
     // H.265 in MP4 needs the hvc1 tag or most players refuse it.
-    if settings.container == Container::Mp4 && plan.encoder.contains("265")
-        || settings.container == Container::Mp4 && plan.encoder.contains("hevc")
+    if settings.container == Container::Mp4
+        && (plan.encoder.contains("265") || plan.encoder.contains("hevc"))
     {
         args.extend([s("-tag:v"), s("hvc1")]);
     }
 
     // Broad-compatibility pixel format — some sources are 10-bit or 4:2:2,
-    // which many players (and Discord's inline preview) won't touch.
-    if !is_hardware && matches!(settings.video_codec, VideoCodec::H264 | VideoCodec::H265) {
-        args.extend([s("-pix_fmt"), s("yuv420p")]);
+    // which many players (and Discord's inline preview) won't touch. Every
+    // encoder, hardware ones included: NVENC accepts 4:4:4 and 10-bit input and
+    // passes it straight through, so a screen capture came out as H.264 High
+    // 4:4:4, which no browser plays. The GPU encoders all take NV12.
+    args.extend([
+        s("-pix_fmt"),
+        s(if is_hardware { "nv12" } else { "yuv420p" }),
+    ]);
+    if info.is_hdr() {
+        // The tone map made it BT.709; say so, rather than letting the
+        // source's BT.2020 tags ride along and mislabel it.
+        args.extend([
+            s("-color_primaries"),
+            s("bt709"),
+            s("-color_trc"),
+            s("bt709"),
+            s("-colorspace"),
+            s("bt709"),
+        ]);
     }
 
     if let Some(n) = pass {
@@ -1036,28 +1267,14 @@ fn build_args(
     }
 
     // Audio, on the real pass only.
-    if !info.has_audio() || settings.audio_codec == AudioCodec::None {
-        args.push(s("-an"));
-    } else {
-        match settings.audio_codec {
-            AudioCodec::Copy => args.extend([s("-c:a"), s("copy")]),
-            AudioCodec::Opus => args.extend([
-                s("-c:a"),
-                s("libopus"),
-                s("-b:a"),
-                format!("{}k", plan.audio_kbps),
-            ]),
-            _ => args.extend([
-                s("-c:a"),
-                s("aac"),
-                s("-b:a"),
-                format!("{}k", plan.audio_kbps),
-                // Downmix to stereo; surround sources waste bitrate Discord won't play back.
-                s("-ac"),
-                s("2"),
-            ]),
-        }
+    match audio_route(settings, info, &mut Vec::new()) {
+        AudioCodec::None => args.push(s("-an")),
+        AudioCodec::Copy => args.extend([s("-c:a"), s("copy")]),
+        other => push_audio_encode(&mut args, other, plan.audio_kbps, info),
     }
+    // Subtitles and data tracks are dropped. Discord shows neither, and a
+    // bitmap subtitle can't be converted into MP4's text format at all.
+    args.extend([s("-sn"), s("-dn")]);
 
     if settings.container == Container::Mp4 {
         // Puts the index at the front so the file starts playing before it's
@@ -1091,6 +1308,22 @@ pub fn run_job(
     bins: &Binaries,
     task: &Task,
     cancel: &Arc<AtomicBool>,
+    on_progress: impl FnMut(f64, &str),
+) -> Result<Result<EncodeOutcome, Cancelled>, String> {
+    let plan = plan(task.info, task.settings, task.edits, bins)?;
+    run_planned(bins, task, plan, cancel, on_progress)
+}
+
+/// Runs an encode to a plan already made.
+///
+/// Split from `run_job` so a test can hand it a plan that names a hardware
+/// encoder on a machine without one, which is the only way to watch the
+/// fallback below happen.
+pub fn run_planned(
+    bins: &Binaries,
+    task: &Task,
+    mut plan: Plan,
+    cancel: &Arc<AtomicBool>,
     mut on_progress: impl FnMut(f64, &str),
 ) -> Result<Result<EncodeOutcome, Cancelled>, String> {
     let Task {
@@ -1101,8 +1334,12 @@ pub fn run_job(
         name_hint,
     } = task;
 
-    let mut plan = plan(info, settings, edits, bins)?;
-    let output = output_path(input, settings, *name_hint)?;
+    // Everything below writes to `dest.partial`. Any way out of here other than
+    // the `commit` at the end — an error, a cancel, a miss on the target —
+    // drops `dest`, which takes both the partial file and the claimed name
+    // back out of the user's folder.
+    let dest = output_destination(input, settings, *name_hint)?;
+    let output = dest.partial.clone();
 
     // Progress is measured against what actually gets written, which after a
     // trim is shorter than the source.
@@ -1123,14 +1360,17 @@ pub fn run_job(
     // Two passes exist to hit a size accurately. Constant quality has no size
     // to hit, so the analysis pass would be pure waste — and a stream copy has
     // no encoder to analyse anything with.
-    let two_pass = plan.crf.is_none()
-        && !plan.copy_streams
-        && settings.two_pass
-        && settings.video_codec.supports_two_pass()
-        && plan.encoder.starts_with("lib")
-        // A GIF isn't encoded by any of that, and an analysis pass over one
-        // writes a log for an encoder that never runs.
-        && !is_gif(task.input);
+    let wants_two_pass = |plan: &Plan| {
+        plan.crf.is_none()
+            && !plan.copy_streams
+            && settings.two_pass
+            && settings.video_codec.supports_two_pass()
+            && plan.encoder.starts_with("lib")
+            // A GIF isn't encoded by any of that, and an analysis pass over one
+            // writes a log for an encoder that never runs.
+            && !is_gif(task.input)
+    };
+    let mut two_pass = wants_two_pass(&plan);
 
     let mut attempts = 0;
     let mut final_bytes;
@@ -1169,11 +1409,34 @@ pub fn run_job(
             let args = build_args(task, &output, &plan, None, &passlog);
             match ffmpeg::run(bins, &args, encoded_duration, cancel, |p| {
                 on_progress(p, "Encoding")
-            })? {
-                Ok(()) => {}
-                Err(c) => {
+            }) {
+                Ok(Ok(())) => {}
+                Ok(Err(c)) => {
                     cleanup_passlog(&passlog);
                     return Ok(Err(c));
+                }
+                // A GPU encoder that passed its two-frame test can still give
+                // up on the real thing — a driver reset, a resolution or pixel
+                // format the chip won't take, another app holding the encoder.
+                // That used to fail the job outright; it's finished in
+                // software instead, which is slower but always works.
+                Err(error) if !plan.encoder.starts_with("lib") => {
+                    let failed = std::mem::replace(
+                        &mut plan.encoder,
+                        settings.video_codec.software().to_string(),
+                    );
+                    plan.notes.push(format!(
+                        "{failed} stopped partway, so this was finished in software."
+                    ));
+                    eprintln!("[encode] {failed} failed, falling back to software: {error}");
+                    two_pass = wants_two_pass(&plan);
+                    attempts -= 1;
+                    on_progress(0.0, "Retrying in software");
+                    continue;
+                }
+                Err(error) => {
+                    cleanup_passlog(&passlog);
+                    return Err(error);
                 }
             }
         }
@@ -1230,6 +1493,7 @@ pub fn run_job(
         ));
     }
 
+    let output = dest.commit()?;
     Ok(Ok(EncodeOutcome {
         output,
         final_bytes,
@@ -1310,10 +1574,33 @@ pub fn can_pass_through(
     // megabyte limit. Re-encoding one to "save" space it isn't using would
     // cost quality for nothing, and the bitrate arithmetic below has no
     // meaning for something with no duration.
-    matches!(
-        ext.as_str(),
-        "mp4" | "m4v" | "mov" | "webm" | "jpg" | "jpeg" | "png" | "gif" | "webp"
-    )
+    if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp") {
+        return true;
+    }
+
+    // A video only fits if Discord will actually play it where it lands. The
+    // extension alone let an iPhone's HEVC `.mov` through untouched — under
+    // the limit, and a download link rather than a video on most clients —
+    // along with AV1, 10-bit and HDR files that fail the same way.
+    plays_inline(info, &ext)
+}
+
+/// Whether Discord's clients play this file in the chat rather than offering
+/// it as a download: H.264 or VP8/VP9 in their usual containers, 8-bit 4:2:0,
+/// SDR, with audio a browser decodes.
+fn plays_inline(info: &MediaInfo, ext: &str) -> bool {
+    let audio = info.audio_codec.as_deref();
+    let streams_fit = match ext {
+        "mp4" | "m4v" | "mov" => {
+            info.video_codec == "h264" && matches!(audio, None | Some("aac" | "mp3"))
+        }
+        "webm" => {
+            matches!(info.video_codec.as_str(), "vp8" | "vp9")
+                && matches!(audio, None | Some("opus" | "vorbis"))
+        }
+        _ => false,
+    };
+    streams_fit && info.is_plain_8bit() && !info.is_hdr()
 }
 
 /// Strips anything Windows or the user would object to in a filename.
@@ -1340,10 +1627,23 @@ pub fn safe_stem(raw: &str) -> String {
     let result = clipped.trim().to_string();
 
     if result.is_empty() {
-        "video".into()
-    } else {
-        result
+        return "video".into();
     }
+
+    // Windows reserves these as device names whatever follows the dot, so a
+    // video titled "CON" can't become `CON.mp4` — creating it fails, or worse,
+    // opens the console.
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED
+        .iter()
+        .any(|name| result.eq_ignore_ascii_case(name))
+    {
+        return format!("{result}_");
+    }
+    result
 }
 
 /// Where finished files land.
@@ -1378,33 +1678,28 @@ pub fn place_untouched(
             .unwrap_or_else(|| "video".into()),
     };
 
-    let mut candidate = dir.join(format!("{stem}.{ext}"));
-    let mut n = 2;
-    while candidate.exists() {
-        candidate = dir.join(format!("{stem}-{n}.{ext}"));
-        n += 1;
-        if n > 999 {
-            return Err("Too many files with that name already.".into());
-        }
-    }
+    let dest = Destination::claim(&dir, &stem, &ext)?;
 
-    // Rename first — it's instant when both sides are on the same volume, which
-    // they usually aren't for a temp download, hence the copy fallback.
-    if std::fs::rename(source, &candidate).is_err() {
-        std::fs::copy(source, &candidate)
-            .map_err(|e| format!("Couldn't move the file into place: {e}"))?;
-        let _ = std::fs::remove_file(source);
+    // Rename first — it's instant when both sides are on the same volume, and
+    // replaces the placeholder in one step. A temp download usually isn't on
+    // the same volume, so the copy goes to the partial name first: a copy
+    // interrupted halfway must not leave a file that looks finished.
+    if std::fs::rename(source, &dest.path).is_ok() {
+        return Ok(dest.keep());
     }
-
-    Ok(candidate)
+    std::fs::copy(source, &dest.partial)
+        .map_err(|e| format!("Couldn't move the file into place: {e}"))?;
+    let placed = dest.commit()?;
+    let _ = std::fs::remove_file(source);
+    Ok(placed)
 }
 
 /// Picks a destination that won't clobber anything the user already has.
-fn output_path(
+fn output_destination(
     input: &Path,
     settings: &Settings,
     name_hint: Option<&str>,
-) -> Result<PathBuf, String> {
+) -> Result<Destination, String> {
     let dir = output_dir(settings)?;
 
     let stem = match name_hint {
@@ -1424,16 +1719,81 @@ fn output_path(
         .or_else(|| is_gif(input).then_some("gif"))
         .unwrap_or_else(|| settings.container.extension());
 
-    let mut candidate = dir.join(format!("{stem}-nitrate.{ext}"));
-    let mut n = 2;
-    while candidate.exists() {
-        candidate = dir.join(format!("{stem}-nitrate-{n}.{ext}"));
-        n += 1;
-        if n > 999 {
-            return Err("Too many files with that name already.".into());
+    Destination::claim(&dir, &format!("{stem}-nitrate"), ext)
+}
+
+/// A name claimed in the output folder, and the file written before it.
+///
+/// Checking that a name was free and then letting ffmpeg create it much later
+/// — pass 2 doesn't start writing until pass 1 is done — left room for another
+/// job to pick the same name in between: two `clip.mp4`s from different
+/// folders, or two links with the same title, both became `clip-nitrate.mp4`
+/// and one overwrote the other. The name is now claimed by creating it, which
+/// only one caller can do.
+///
+/// The work goes into a `.partial` file beside it and is renamed over the
+/// placeholder once it's whole. A cancel or a failure used to leave the
+/// half-written file behind under the finished name — an MP4 with no index,
+/// which won't play, sitting in Downloads looking done. Dropped without
+/// `commit`, this removes both.
+struct Destination {
+    path: PathBuf,
+    partial: PathBuf,
+    done: bool,
+}
+
+impl Destination {
+    fn claim(dir: &Path, stem: &str, ext: &str) -> Result<Destination, String> {
+        for n in 1..1000 {
+            let name = if n == 1 {
+                stem.to_string()
+            } else {
+                format!("{stem}-{n}")
+            };
+            let path = dir.join(format!("{name}.{ext}"));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => {
+                    // Still ending in the real extension, which is how ffmpeg
+                    // picks the container to write.
+                    let partial = dir.join(format!("{name}.partial.{ext}"));
+                    return Ok(Destination {
+                        path,
+                        partial,
+                        done: false,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("Couldn't write to {}: {e}", dir.display())),
+            }
+        }
+        Err("Too many files with that name already.".into())
+    }
+
+    /// Moves the finished partial file into the claimed name.
+    fn commit(self) -> Result<PathBuf, String> {
+        std::fs::rename(&self.partial, &self.path)
+            .map_err(|e| format!("Couldn't put the finished file in place: {e}"))?;
+        Ok(self.keep())
+    }
+
+    /// The claimed name now holds the real file, however it got there.
+    fn keep(mut self) -> PathBuf {
+        self.done = true;
+        std::mem::take(&mut self.path)
+    }
+}
+
+impl Drop for Destination {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = std::fs::remove_file(&self.partial);
+            let _ = std::fs::remove_file(&self.path);
         }
     }
-    Ok(candidate)
 }
 
 fn dirs_downloads() -> Option<PathBuf> {
@@ -1463,10 +1823,130 @@ fn cleanup_passlog(passlog: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    // With the separator, or job 1's cleanup matches `-10-0.log` through
+    // `-19-0.log` too and deletes stats another job's second pass still needs.
+    let prefix = format!("{prefix}-");
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with(&prefix) {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info() -> MediaInfo {
+        MediaInfo {
+            duration: 10.0,
+            width: 1280,
+            height: 720,
+            fps: 30.0,
+            video_codec: "h264".into(),
+            audio_codec: Some("aac".into()),
+            audio_bitrate_kbps: Some(128),
+            size_bytes: 10_000_000,
+            pix_fmt: Some("yuv420p".into()),
+            color_transfer: None,
+            audio_channels: Some(2),
+        }
+    }
+
+    fn plan_with(encoder: &str, crf: Option<u32>) -> Plan {
+        Plan {
+            mode: TargetMode::Quality,
+            crf,
+            video_kbps: 2000,
+            audio_kbps: 128,
+            width: 1280,
+            height: 720,
+            fps: 30.0,
+            encoder: encoder.into(),
+            downscaled: false,
+            estimated_bytes: None,
+            copy_streams: false,
+            notes: Vec::new(),
+        }
+    }
+
+    fn args_for(input: &str, plan: &Plan, edits: Edits) -> Vec<String> {
+        let info = info();
+        let settings = Settings::default();
+        let task = Task {
+            input: Path::new(input),
+            info: &info,
+            settings: &settings,
+            edits: &edits,
+            name_hint: None,
+        };
+        build_args(&task, Path::new("out"), plan, None, Path::new("log"))
+    }
+
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn amd_constant_quality_uses_the_flags_amf_has() {
+        let args = args_for("in.mp4", &plan_with("h264_amf", Some(23)), Edits::default());
+        assert!(has_pair(&args, "-rc", "cqp"), "{args:?}");
+        assert!(has_pair(&args, "-qp_i", "23") && has_pair(&args, "-qp_p", "23"));
+        assert!(has_pair(&args, "-qp_b", "23"));
+        assert!(!args.iter().any(|a| a == "-qp"), "AMF has no -qp: {args:?}");
+
+        // HEVC on AMF has no B-frames to set.
+        let hevc = args_for("in.mp4", &plan_with("hevc_amf", Some(27)), Edits::default());
+        assert!(has_pair(&hevc, "-qp_i", "27") && !hevc.iter().any(|a| a == "-qp_b"));
+    }
+
+    #[test]
+    fn gpu_encodes_get_a_pixel_format_browsers_play() {
+        let args = args_for("in.mp4", &plan_with("h264_nvenc", None), Edits::default());
+        assert!(has_pair(&args, "-pix_fmt", "nv12"), "{args:?}");
+    }
+
+    #[test]
+    fn a_cropped_webp_keeps_its_quality() {
+        let crop = Edits {
+            crop: Some(CropRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            }),
+            ..Edits::default()
+        };
+        let webp = args_for("photo.webp", &plan_with("libx264", None), crop);
+        assert!(has_pair(&webp, "-quality", "90"), "{webp:?}");
+        assert!(
+            !webp.iter().any(|a| a == "-q:v"),
+            "2/100 to libwebp: {webp:?}"
+        );
+
+        let jpg = args_for("photo.jpg", &plan_with("libx264", None), crop);
+        assert!(has_pair(&jpg, "-q:v", "2"));
+    }
+
+    #[test]
+    fn passlog_cleanup_leaves_other_jobs_alone() {
+        let dir = std::env::temp_dir().join(format!("nitrate-passlog-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = ["job-1-0.log", "job-1-0.log.mbtree"];
+        let theirs = ["job-10-0.log", "job-12-0.log.mbtree", "job-100-0.log"];
+        for name in mine.iter().chain(&theirs) {
+            std::fs::write(dir.join(name), b"stats").unwrap();
+        }
+
+        cleanup_passlog(&dir.join("job-1"));
+
+        for name in mine {
+            assert!(!dir.join(name).exists(), "{name} should be gone");
+        }
+        for name in theirs {
+            assert!(dir.join(name).exists(), "{name} belongs to another job");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -318,8 +318,11 @@ fn position_near_tray(window: &WebviewWindow, rect: Rect) {
         tray_pos.y - win_h - GAP
     };
 
-    x = x.clamp(mon_x + GAP, mon_x + mon_w - win_w - GAP);
-    y = y.clamp(mon_y + GAP, mon_y + mon_h - win_h - GAP);
+    // Not `clamp`: the editor's expanded size is taller than a 768p laptop
+    // screen (or 1080p at 150%), which puts the maximum below the minimum, and
+    // clamp panics on that — taking every running encode down with it.
+    x = x.min(mon_x + mon_w - win_w - GAP).max(mon_x + GAP);
+    y = y.min(mon_y + mon_h - win_h - GAP).max(mon_y + GAP);
 
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }

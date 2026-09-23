@@ -67,68 +67,70 @@ pub fn parse(raw: &str) -> Result<Incoming, Rejected> {
     };
 
     let decoded = percent_decode(target);
-    validate(&decoded)?;
-    Ok(Incoming { url: decoded })
+    let url = validate(&decoded)?;
+    Ok(Incoming { url })
 }
 
 /// Only plain web links, and never at an address inside the machine or network.
-fn validate(url: &str) -> Result<(), Rejected> {
-    let lower = url.to_lowercase();
+///
+/// Returns the link as parsed, and that's what gets handed on. Checking one
+/// reading of a string and fetching another is how filters like this are
+/// usually got round — `http://a.com\@127.0.0.1/` is a.com to a browser and
+/// 127.0.0.1 to Python's urllib — so the downloader only ever sees the
+/// normalised form that was actually checked.
+fn validate(raw: &str) -> Result<String, Rejected> {
+    let lower = raw.to_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return Err(Rejected::UnsupportedScheme);
     }
 
-    let authority = lower
-        .split("://")
-        .nth(1)
-        .and_then(|rest| rest.split(['/', '?', '#']).next())
-        .map(|h| h.split('@').next_back().unwrap_or(h))
-        .unwrap_or("");
-
-    // IPv6 authorities are bracketed, so the port can't be found by splitting
-    // on the first colon — that would cut `[::1]:9000` to `[`.
-    let host = match authority.strip_prefix('[') {
-        Some(rest) => rest.split(']').next().unwrap_or(""),
-        None => authority.split(':').next().unwrap_or(authority),
-    }
-    .to_string();
-
-    if host.is_empty() {
-        return Err(Rejected::Malformed);
-    }
+    // The WHATWG parser, same as a browser's: it reads `127.1`, `2130706433`
+    // and `0x7f000001` as the loopback address they resolve to, where matching
+    // on dotted-quad text let every one of them through.
+    let parsed = url::Url::parse(raw).map_err(|_| Rejected::Malformed)?;
+    let host = parsed.host().ok_or(Rejected::Malformed)?;
     if is_private_host(&host) {
         return Err(Rejected::PrivateAddress);
     }
 
-    Ok(())
+    Ok(parsed.into())
 }
 
-fn is_private_host(host: &str) -> bool {
-    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
-        return true;
-    }
-
-    // IPv6 loopback and unique-local.
-    if host == "::1" || host.starts_with("fc") || host.starts_with("fd") || host.starts_with("fe80")
-    {
-        return true;
-    }
-
-    let octets: Vec<u8> = host
-        .split('.')
-        .filter_map(|part| part.parse::<u8>().ok())
-        .collect();
-    if octets.len() != 4 || host.split('.').count() != 4 {
-        // A name rather than a bare IP; DNS could still resolve inward, but
+fn is_private_host(host: &url::Host<&str>) -> bool {
+    match host {
+        // A name rather than an address. DNS could still resolve inward, but
         // blocking every hostname would block the whole point of the feature.
-        return false;
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.');
+            name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local")
+        }
+        url::Host::Ipv4(ip) => is_private_v4(*ip),
+        url::Host::Ipv6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_private_v4(v4);
+            }
+            let first = ip.segments()[0];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                // Unique-local, fc00::/7.
+                || (first & 0xfe00) == 0xfc00
+                // Link-local, fe80::/10.
+                || (first & 0xffc0) == 0xfe80
+        }
     }
+}
 
-    matches!(octets[0], 0 | 10 | 127)
-        || (octets[0] == 192 && octets[1] == 168)
-        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
-        || (octets[0] == 169 && octets[1] == 254)
-        || octets[0] >= 224
+fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || a == 0
+        // Carrier-grade NAT, 100.64.0.0/10 — the ISP's side of the router.
+        || (a == 100 && (b & 0xc0) == 64)
+        // Multicast, reserved and broadcast.
+        || a >= 224
 }
 
 /// Minimal percent-decoding — enough for a URL in a query string.
@@ -233,8 +235,52 @@ mod tests {
     }
 
     #[test]
+    fn refuses_other_spellings_of_the_same_addresses() {
+        // Every one of these resolves to loopback or the LAN, and every one
+        // got past a check that only recognised dotted-quad text.
+        for host in [
+            "http://127.1/",
+            "http://2130706433/",
+            "http://0x7f000001/",
+            "http://0177.0.0.1/",
+            "http://localhost./",
+            "http://[0:0:0:0:0:0:0:1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:192.168.0.1]/",
+            "http://[::]/",
+            "http://[fe90::1]/",
+            "http://[fd12:3456::1]/",
+            "http://100.64.0.1/",
+            "http://0.0.0.0/",
+        ] {
+            let raw = format!("nitrate://add?url={}", urlencode(host));
+            assert_eq!(parse(&raw), Err(Rejected::PrivateAddress), "{host}");
+        }
+    }
+
+    #[test]
+    fn hands_on_the_address_that_was_checked() {
+        // urllib would read the host here as 127.0.0.1. The parser reads it as
+        // a.com, so what goes on must be its reading, not the raw string.
+        let raw = format!(
+            "nitrate://add?url={}",
+            urlencode("http://a.com\\@127.0.0.1/")
+        );
+        let got = parse(&raw).expect("a.com is public");
+        assert_eq!(url::Url::parse(&got.url).unwrap().host_str(), Some("a.com"));
+        assert!(!got.url.contains('\\'), "{}", got.url);
+    }
+
+    #[test]
     fn still_allows_ordinary_public_addresses() {
-        for host in ["https://youtu.be/x", "https://8.8.8.8/video.mp4"] {
+        for host in [
+            "https://youtu.be/x",
+            "https://8.8.8.8/video.mp4",
+            // Names that merely start like an IPv6 prefix are still names.
+            "https://fcbarcelona.com/video",
+            "https://fdrlive.com/",
+            "https://fe80.example/",
+        ] {
             let raw = format!("nitrate://add?url={}", urlencode(host));
             assert!(parse(&raw).is_ok(), "{host}");
         }

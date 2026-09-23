@@ -1,5 +1,6 @@
 //! Locating, probing and driving the bundled ffmpeg/ffprobe binaries.
 
+use crate::children::Spawn;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -89,6 +90,7 @@ fn current_triple() -> &'static str {
 }
 
 fn base_command(program: &Path) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -111,11 +113,32 @@ pub struct MediaInfo {
     /// Needed to budget correctly when the audio track is stream-copied.
     pub audio_bitrate_kbps: Option<u32>,
     pub size_bytes: u64,
+    /// The video's pixel format, e.g. `yuv420p` or `yuv420p10le`.
+    pub pix_fmt: Option<String>,
+    /// The video's transfer characteristic, which is what marks it as HDR.
+    pub color_transfer: Option<String>,
+    pub audio_channels: Option<u32>,
 }
 
 impl MediaInfo {
     pub fn has_audio(&self) -> bool {
         self.audio_codec.is_some()
+    }
+
+    /// PQ or HLG, the two ways a video says its brightness goes past SDR.
+    pub fn is_hdr(&self) -> bool {
+        matches!(
+            self.color_transfer.as_deref(),
+            Some("smpte2084" | "arib-std-b67")
+        )
+    }
+
+    /// 8-bit 4:2:0 — the one pixel format every browser and phone decodes.
+    pub fn is_plain_8bit(&self) -> bool {
+        matches!(
+            self.pix_fmt.as_deref(),
+            Some("yuv420p" | "yuvj420p" | "nv12")
+        )
     }
 }
 
@@ -135,6 +158,54 @@ struct ProbeStream {
     r_frame_rate: Option<String>,
     duration: Option<String>,
     bit_rate: Option<String>,
+    pix_fmt: Option<String>,
+    color_transfer: Option<String>,
+    channels: Option<u32>,
+    #[serde(default)]
+    side_data_list: Vec<ProbeSideData>,
+    #[serde(default)]
+    tags: ProbeTags,
+}
+
+// Read loosely: these only ever matter for a rotation, and a side-data or
+// tag shape nobody expected mustn't turn into a probe that fails outright.
+#[derive(Deserialize)]
+struct ProbeSideData {
+    rotation: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Default)]
+struct ProbeTags {
+    rotate: Option<serde_json::Value>,
+    /// mkvmerge's per-track statistics, often the only bitrate an MKV has.
+    #[serde(rename = "BPS")]
+    bps: Option<serde_json::Value>,
+    #[serde(rename = "BPS-eng")]
+    bps_eng: Option<serde_json::Value>,
+}
+
+fn as_degrees(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+}
+
+impl ProbeStream {
+    /// Whether the picture is displayed a quarter-turn from how it's stored.
+    ///
+    /// Phones record portrait video as landscape frames plus a rotation flag,
+    /// and ffmpeg applies that flag before any `-vf` runs. So the size that
+    /// matters for planning, cropping and scaling is the displayed one — the
+    /// stored one made a 90% crop too big for the frame and a scale the wrong
+    /// way round.
+    fn quarter_turned(&self) -> bool {
+        let degrees = self
+            .side_data_list
+            .iter()
+            .find_map(|side| side.rotation.as_ref().and_then(as_degrees))
+            .or_else(|| self.tags.rotate.as_ref().and_then(as_degrees));
+        degrees.is_some_and(|d: f64| (d.rem_euclid(180.0) - 90.0).abs() < 1.0)
+    }
 }
 
 #[derive(Deserialize)]
@@ -166,7 +237,7 @@ pub fn probe(bins: &Binaries, input: &Path) -> Result<MediaInfo, String> {
         ])
         .arg(input)
         .stdin(Stdio::null())
-        .output()
+        .output_contained()
         .map_err(|e| format!("Couldn't run ffprobe: {e}"))?;
 
     if !output.status.success() {
@@ -218,19 +289,145 @@ pub fn probe(bins: &Binaries, input: &Path) -> Result<MediaInfo, String> {
         .or_else(|| std::fs::metadata(input).ok().map(|m| m.len()))
         .unwrap_or(0);
 
+    let (width, height) = (video.width.unwrap_or(0), video.height.unwrap_or(0));
+    let (width, height) = if video.quarter_turned() {
+        (height, width)
+    } else {
+        (width, height)
+    };
+
     Ok(MediaInfo {
         duration,
-        width: video.width.unwrap_or(0),
-        height: video.height.unwrap_or(0),
+        width,
+        height,
         fps,
         video_codec: video.codec_name.clone().unwrap_or_else(|| "unknown".into()),
         audio_codec: audio.and_then(|a| a.codec_name.clone()),
-        audio_bitrate_kbps: audio
-            .and_then(|a| a.bit_rate.as_deref())
-            .and_then(|b| b.parse::<u64>().ok())
-            .map(|bps| (bps / 1000).max(1) as u32),
+        audio_bitrate_kbps: audio.and_then(stream_kbps),
         size_bytes,
+        pix_fmt: video.pix_fmt.clone(),
+        color_transfer: video.color_transfer.clone(),
+        audio_channels: audio.and_then(|a| a.channels),
     })
+}
+
+/// A stream's bitrate: its own field, or the statistics tag MKVs carry
+/// instead. WebM and many MKVs have neither — see `measure_audio_kbps`.
+fn stream_kbps(stream: &ProbeStream) -> Option<u32> {
+    let bps = stream
+        .bit_rate
+        .as_deref()
+        .and_then(|b| b.trim().parse::<u64>().ok())
+        .or_else(|| {
+            [&stream.tags.bps, &stream.tags.bps_eng]
+                .into_iter()
+                .flatten()
+                .find_map(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok()))
+        })?;
+    Some((bps / 1000).max(1) as u32)
+}
+
+/// Works out a copied audio track's bitrate by adding up its packets.
+///
+/// Copying spends whatever the source spent, so the budget needs the real
+/// number. WebM and most MKVs don't state one, and the fallback was the
+/// bitrate setting — which budgeted a 320k Opus track as 128k, overshot, and
+/// burned the retries finding out. Reading every packet header costs a pass
+/// over the file, so it's only done for a copy, and remembered.
+pub fn measure_audio_kbps(bins: &Binaries, input: &Path, duration: f64) -> Option<u32> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    /// Keyed by path and size, so a file replaced in place is measured again.
+    type Measured = Mutex<HashMap<(PathBuf, u64), Option<u32>>>;
+    static MEASURED: OnceLock<Measured> = OnceLock::new();
+    let size = std::fs::metadata(input).ok()?.len();
+    let key = (input.to_path_buf(), size);
+    let cache = MEASURED.get_or_init(Default::default);
+    if let Some(known) = cache.lock().unwrap().get(&key) {
+        return *known;
+    }
+
+    let output = base_command(&bins.ffprobe)
+        .args([
+            "-v",
+            "quiet",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "packet=size",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(input)
+        .output_contained()
+        .ok()?;
+    let bytes: u64 = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().trim_end_matches(',').parse::<u64>().ok())
+        .sum();
+    let kbps = (output.status.success() && bytes > 0 && duration > 0.0)
+        .then(|| ((bytes as f64 * 8.0 / 1000.0 / duration).ceil() as u32).max(1));
+
+    cache.lock().unwrap().insert(key, kbps);
+    kbps
+}
+
+/// Several stills from one video, a few per ffmpeg run.
+///
+/// The editor's filmstrip used to start a process per frame — twelve, one
+/// after another, each paying its own start-up and probe, every time the
+/// editor opened. Here each frame is an input that seeks on its own, keeping
+/// the fast keyframe seek, and an output of its own, so a frame past the end
+/// costs only that frame. They go four to a run: all twelve at once would hold
+/// twelve decoders in memory together, which for 4K HEVC is most of a
+/// gigabyte.
+pub fn frames(
+    bins: &Binaries,
+    input: &Path,
+    times: &[f64],
+    width: u32,
+    dir: &Path,
+) -> Vec<Option<PathBuf>> {
+    const PER_RUN: usize = 4;
+
+    let outs: Vec<PathBuf> = (0..times.len())
+        .map(|i| dir.join(format!("frame-{i}.jpg")))
+        .collect();
+
+    for (batch, chunk) in times.chunks(PER_RUN).enumerate() {
+        let mut cmd = base_command(&bins.ffmpeg);
+        cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+        for at in chunk {
+            cmd.args(["-threads", "2"]);
+            // As in `thumbnail`: a photo is a fortieth of a second long, and
+            // seeking into one at all finds nothing.
+            if *at > 0.05 {
+                cmd.args(["-ss", &format!("{at:.3}")]);
+            }
+            cmd.arg("-i").arg(input);
+        }
+        for (i, _) in chunk.iter().enumerate() {
+            cmd.args([
+                "-map",
+                &format!("{i}:v:0"),
+                "-frames:v",
+                "1",
+                "-vf",
+                &format!("scale={width}:-2:flags=bilinear"),
+                "-q:v",
+                "4",
+            ])
+            .arg(&outs[batch * PER_RUN + i]);
+        }
+        let _ = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status_contained();
+    }
+
+    outs.into_iter().map(|p| p.is_file().then_some(p)).collect()
 }
 
 /// Grabs a single frame partway through the video.
@@ -266,7 +463,7 @@ pub fn thumbnail(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_contained()
         .map_err(|e| format!("Couldn't run ffmpeg: {e}"))?;
 
     if status.success() {
@@ -305,7 +502,7 @@ pub fn run(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_contained()
         .map_err(|e| format!("Couldn't start ffmpeg: {e}"))?;
 
     // ffmpeg will block once the stderr pipe fills, so it must be drained
@@ -421,7 +618,7 @@ pub fn available_encoders(bins: &Binaries) -> Vec<String> {
     let Ok(output) = base_command(&bins.ffmpeg)
         .args(["-hide_banner", "-encoders"])
         .stdin(Stdio::null())
-        .output()
+        .output_contained()
     else {
         return Vec::new();
     };
@@ -461,7 +658,7 @@ pub fn encoder_works(bins: &Binaries, encoder: &str) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_contained()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -528,7 +725,7 @@ pub fn preview_proxy(bins: &Binaries, input: &Path, out: &Path) -> Result<(), St
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status_contained()
         .map_err(|e| format!("Couldn't run ffmpeg: {e}"))?;
 
     if !status.success() {

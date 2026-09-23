@@ -3,7 +3,7 @@
   import { formatBitrate, formatDuration, formatSize } from "../format";
   import { ASPECTS, VIDEO_CODECS } from "../presets";
   import { app } from "../state.svelte";
-  import type { CropRect, Job, VideoCodec } from "../types";
+  import type { CropRect, Edits, Job, VideoCodec } from "../types";
   import TargetPicker from "./TargetPicker.svelte";
 
   interface Props {
@@ -11,10 +11,27 @@
   }
 
   let { job }: Props = $props();
+  /** Ties controls to the hidden notes that explain their keys. */
+  const uid = $props.id();
+
+  // Kept apart from the prop because edits are written on the way out, and by
+  // then the editor is being torn down. The keyed block in App means the job
+  // can't change underneath it.
+  /* svelte-ignore state_referenced_locally */
+  const jobId = job.id;
 
   const duration = $derived(job.info?.duration ?? 0);
   const sourceW = $derived(job.info?.width ?? 0);
   const sourceH = $derived(job.info?.height ?? 0);
+
+  /**
+   * How far a single frame moves the playhead. A probe can come back without
+   * a usable rate, and stepping by a common one beats not stepping at all.
+   */
+  const frameStep = $derived.by(() => {
+    const fps = job.info?.fps ?? 0;
+    return Number.isFinite(fps) && fps > 0 ? 1 / fps : 1 / 30;
+  });
 
   // Playback is preferred, and the file itself is tried first. What a webview
   // can decode is not the same list as what this app can produce, though — AV1
@@ -183,18 +200,40 @@
       .catch(() => (strip = []));
   });
 
-  // Push edits back to the store so the plan readout recalculates.
-  let commitTimer: ReturnType<typeof setTimeout> | undefined;
-  $effect(() => {
-    const next = {
+  /** The edits as the job stores them, where an untouched end is null. */
+  function currentEdits(): Edits {
+    return {
       start: inPoint > 0.01 ? inPoint : null,
       end: effectiveOut < duration - 0.01 ? effectiveOut : null,
       crop: crop ? { ...crop } : null,
     };
+  }
+
+  // Push edits back to the store so the plan readout recalculates.
+  //
+  // Debounced, because a drag or a held key changes them many times a second
+  // and every write asks for a new plan. What's waiting is held on to rather
+  // than only timed, so it can be written the moment the editor goes: a nudge
+  // made just before Back or Compress used to vanish with the timer.
+  let commitTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingEdits: Edits | null = null;
+
+  function flushEdits() {
     clearTimeout(commitTimer);
-    commitTimer = setTimeout(() => app.setEdits(job.id, next), 180);
-    return () => clearTimeout(commitTimer);
+    if (!pendingEdits) return;
+    app.setEdits(jobId, pendingEdits);
+    pendingEdits = null;
+  }
+
+  $effect(() => {
+    pendingEdits = currentEdits();
+    clearTimeout(commitTimer);
+    commitTimer = setTimeout(flushEdits, 180);
   });
+
+  // However the editor closes — Back, Compress, another clip — nothing waiting
+  // is left behind.
+  $effect(() => () => flushEdits());
 
   // ---------------------------------------------------------------------
   // Playback
@@ -339,21 +378,22 @@
     drag = { mode, startX: event.clientX, startY: event.clientY, rect: { ...crop } };
   }
 
-  function onDrag(event: PointerEvent) {
-    if (!drag || !crop || !previewEl) return;
-    const box = previewEl.getBoundingClientRect();
-    const dx = (event.clientX - drag.startX) / box.width;
-    const dy = (event.clientY - drag.startY) / box.height;
-    const start = drag.rect;
+  /**
+   * Moves the rectangle, or resizes it from one corner, by a distance given
+   * in fractions of the frame.
+   *
+   * A drag and a key press both come through here, so a nudge is clamped and
+   * held to the aspect exactly as the pointer is.
+   */
+  function reshape(start: CropRect, mode: DragMode, dx: number, dy: number): CropRect {
     const ratio = ratioFor(aspect);
 
-    if (drag.mode === "move") {
-      crop = {
+    if (mode === "move") {
+      return {
         ...start,
         x: clamp(start.x + dx, 0, 1 - start.width),
         y: clamp(start.y + dy, 0, 1 - start.height),
       };
-      return;
     }
 
     // Corner resize: anchor the opposite corner and move this one.
@@ -364,14 +404,14 @@
     let w = start.width;
     let h = start.height;
 
-    if (drag.mode === "se") {
+    if (mode === "se") {
       w = clamp(start.width + dx, 0.05, 1 - start.x);
       h = clamp(start.height + dy, 0.05, 1 - start.y);
-    } else if (drag.mode === "sw") {
+    } else if (mode === "sw") {
       x = clamp(start.x + dx, 0, right - 0.05);
       w = right - x;
       h = clamp(start.height + dy, 0.05, 1 - start.y);
-    } else if (drag.mode === "ne") {
+    } else if (mode === "ne") {
       w = clamp(start.width + dx, 0.05, 1 - start.x);
       y = clamp(start.y + dy, 0, bottom - 0.05);
       h = bottom - y;
@@ -389,14 +429,54 @@
         h = 1;
         w = (h * ratio) / sourceRatio;
       }
-      if (drag.mode === "nw" || drag.mode === "ne") y = bottom - h;
-      if (drag.mode === "nw" || drag.mode === "sw") x = right - w;
+      if (mode === "nw" || mode === "ne") y = bottom - h;
+      if (mode === "nw" || mode === "sw") x = right - w;
       y = clamp(y, 0, 1 - h);
       x = clamp(x, 0, 1 - w);
     }
 
-    crop = { x, y, width: w, height: h };
+    return { x, y, width: w, height: h };
   }
+
+  function onDrag(event: PointerEvent) {
+    if (!drag || !crop || !previewEl) return;
+    const box = previewEl.getBoundingClientRect();
+    crop = reshape(
+      drag.rect,
+      drag.mode,
+      (event.clientX - drag.startX) / box.width,
+      (event.clientY - drag.startY) / box.height,
+    );
+  }
+
+  /**
+   * Arrow keys nudge the crop a hundredth of the frame, or a tenth with Shift.
+   * On the box they move it; on a corner they resize from that corner, which
+   * under a fixed aspect means the width leads and the height follows, as it
+   * does with the pointer.
+   */
+  function onCropKey(event: KeyboardEvent, mode: DragMode) {
+    if (!crop || event.altKey || event.ctrlKey || event.metaKey) return;
+    const step = event.shiftKey ? 0.1 : 0.01;
+    let dx = 0;
+    let dy = 0;
+    if (event.key === "ArrowLeft") dx = -step;
+    else if (event.key === "ArrowRight") dx = step;
+    else if (event.key === "ArrowUp") dy = -step;
+    else if (event.key === "ArrowDown") dy = step;
+    else return;
+    event.preventDefault();
+    crop = reshape(crop, mode, dx, dy);
+  }
+
+  /** What the crop box is called aloud: its size, then where it sits. */
+  const cropLabel = $derived(
+    crop
+      ? `Crop area, ${croppedW} by ${croppedH} pixels, ` +
+          `${Math.round(sourceW * crop.x)} from the left, ` +
+          `${Math.round(sourceH * crop.y)} from the top`
+      : "",
+  );
 
   function clamp(v: number, lo: number, hi: number) {
     return Math.min(Math.max(v, lo), hi);
@@ -436,18 +516,113 @@
     onScrub(event);
   }
 
+  /** The shortest clip a trim can leave. */
+  const MIN_CLIP = 0.2;
+
+  // Each end stays inside the file and a clip's length from the other, and the
+  // preview jumps to it so the cut can be seen. The pointer can't leave the
+  // strip, but a key pressed at the limit can ask to, so both ends are held.
+  function setIn(t: number) {
+    inPoint = clamp(t, 0, Math.max(0, effectiveOut - MIN_CLIP));
+    seek(inPoint);
+  }
+
+  function setOut(t: number) {
+    outPoint = clamp(t, Math.min(inPoint + MIN_CLIP, duration), duration);
+    seek(outPoint);
+  }
+
   function onScrub(event: PointerEvent) {
     if (!scrub) return;
     const t = timeFromEvent(event);
     if (scrub === "in") {
-      inPoint = Math.min(t, effectiveOut - 0.2);
-      seek(inPoint);
+      setIn(t);
     } else if (scrub === "out") {
-      outPoint = Math.max(t, inPoint + 0.2);
-      seek(outPoint);
+      setOut(t);
     } else {
       seek(t);
     }
+  }
+
+  /**
+   * The timeline's three sliders, from the keyboard.
+   *
+   * All take the standard slider keys — Right and Up step forward, Left and
+   * Down back, Page Up and Page Down jump ten seconds, Home and End go to the
+   * limit — which is also what a screen reader sends to change one. The
+   * playhead steps in seconds, or a frame at a time with Alt or Ctrl, since
+   * finding a frame is what it's for; the trim ends step in tenths, for
+   * placing a cut. I and O mark the clip at the playhead, as most editors do.
+   */
+  function onTimelineKey(event: KeyboardEvent, handle: Handle) {
+    if (duration <= 0 || event.metaKey) return;
+    const onPlayhead = handle === "playhead";
+
+    if (onPlayhead && !event.altKey && !event.ctrlKey) {
+      const letter = event.key.toLowerCase();
+      if (letter === "i" || letter === "o") {
+        event.preventDefault();
+        if (letter === "i") setIn(playhead);
+        else setOut(playhead);
+        return;
+      }
+    }
+    if (!onPlayhead && (event.altKey || event.ctrlKey)) return;
+
+    let value = playhead;
+    let min = 0;
+    let max = duration;
+    let step = event.altKey || event.ctrlKey ? frameStep : event.shiftKey ? 5 : 1;
+    if (handle === "in") {
+      value = inPoint;
+      max = effectiveOut - MIN_CLIP;
+    } else if (handle === "out") {
+      value = effectiveOut;
+      min = inPoint + MIN_CLIP;
+    }
+    if (!onPlayhead) step = event.shiftKey ? 1 : 0.1;
+
+    let to: number;
+    switch (event.key) {
+      case "ArrowRight":
+      case "ArrowUp":
+        to = value + step;
+        break;
+      case "ArrowLeft":
+      case "ArrowDown":
+        to = value - step;
+        break;
+      case "PageUp":
+        to = value + 10;
+        break;
+      case "PageDown":
+        to = value - 10;
+        break;
+      case "Home":
+        to = min;
+        break;
+      case "End":
+        to = max;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    // A drag pauses too: the frame on screen is the point of moving these.
+    if (playing) videoEl?.pause();
+    if (handle === "in") setIn(to);
+    else if (handle === "out") setOut(to);
+    else seek(clamp(to, 0, duration));
+  }
+
+  /**
+   * A time to the tenth, for what a screen reader announces. The readouts
+   * round to whole seconds, so a trim end moving a tenth at a time would be
+   * read out as the same number ten presses running.
+   */
+  function spokenTime(t: number): string {
+    const tenths = Math.round(t * 10);
+    return `${formatDuration(Math.floor(tenths / 10))}.${tenths % 10}`;
   }
 
   function resetTrim() {
@@ -459,19 +634,18 @@
   const pct = (t: number) => (duration > 0 ? (t / duration) * 100 : 0);
 
   async function compress() {
+    // The job starts from the edits it holds, so the last nudge can't be left
+    // sitting in the timer.
+    flushEdits();
     // Pressing this is the whole permission slip for re-encoding a GIF, which
     // is left alone anywhere else in the app. Without it a GIF asked to shrink
     // would be copied instead and report itself done having changed nothing.
     if (isGif) {
-      app.setEdits(job.id, {
-        start: inPoint > 0.01 ? inPoint : null,
-        end: effectiveOut < duration - 0.01 ? effectiveOut : null,
-        crop: crop ? { ...crop } : null,
-        forceEncode: true,
-      });
+      app.setEdits(jobId, { ...currentEdits(), forceEncode: true });
     }
     await app.closeEditor();
-    await app.start(job.id);
+    // The editor is gone by now, and the prop with it.
+    await app.start(jobId);
   }
 </script>
 
@@ -533,37 +707,56 @@
       {/if}
 
       {#if crop}
+        <!-- An application rather than a group: a screen reader in its
+             reading mode keeps the arrow keys for itself inside a group, and
+             moving the box is what they're for here. The linter counts it as
+             static all the same. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="crop"
           role="application"
-          aria-label="Crop area"
+          tabindex="0"
+          aria-label={cropLabel}
+          aria-describedby="{uid}-crop-keys"
           style:left="{crop.x * 100}%"
           style:top="{crop.y * 100}%"
           style:width="{crop.width * 100}%"
           style:height="{crop.height * 100}%"
           onpointerdown={(e) => beginDrag(e, "move")}
+          onkeydown={(e) => {
+            // A corner's keys are that corner's, not a move of the whole box.
+            if (e.target === e.currentTarget) onCropKey(e, "move");
+          }}
         >
           <button
             class="handle nw"
-            aria-label="Resize from top left"
+            aria-label="Resize crop from top-left corner"
             onpointerdown={(e) => beginDrag(e, "nw")}
+            onkeydown={(e) => onCropKey(e, "nw")}
           ></button>
           <button
             class="handle ne"
-            aria-label="Resize from top right"
+            aria-label="Resize crop from top-right corner"
             onpointerdown={(e) => beginDrag(e, "ne")}
+            onkeydown={(e) => onCropKey(e, "ne")}
           ></button>
           <button
             class="handle sw"
-            aria-label="Resize from bottom left"
+            aria-label="Resize crop from bottom-left corner"
             onpointerdown={(e) => beginDrag(e, "sw")}
+            onkeydown={(e) => onCropKey(e, "sw")}
           ></button>
           <button
             class="handle se"
-            aria-label="Resize from bottom right"
+            aria-label="Resize crop from bottom-right corner"
             onpointerdown={(e) => beginDrag(e, "se")}
+            onkeydown={(e) => onCropKey(e, "se")}
           ></button>
         </div>
+        <span id="{uid}-crop-keys" hidden>
+          Arrow keys move it, and resize it from a corner. Hold Shift for
+          bigger steps.
+        </span>
       {/if}
 
       {#if loadingFrame && !canPlay}<div class="spinner"></div>{/if}
@@ -593,42 +786,70 @@
          sitting there disabled. Crop is the only edit that means anything. -->
     {#if !isStill}
     <div class="timeline">
-      <div
-        class="strip"
-        bind:this={stripEl}
-        role="slider"
-        tabindex="0"
-        aria-label="Playhead"
-        aria-valuemin={0}
-        aria-valuemax={duration}
-        aria-valuenow={playhead}
-        onpointerdown={(e) => beginScrub(e, "playhead")}
-      >
-        {#each strip as src, i (i)}
-          <img src={src} alt="" draggable="false" />
-        {/each}
-        {#if strip.length === 0}
-          <div class="strip-empty"></div>
-        {/if}
+      <div class="track">
+        <div
+          class="strip"
+          bind:this={stripEl}
+          role="slider"
+          tabindex="0"
+          aria-label="Playhead"
+          aria-valuemin={0}
+          aria-valuemax={duration}
+          aria-valuenow={playhead}
+          aria-valuetext="{spokenTime(playhead)} of {formatDuration(duration)}"
+          aria-describedby="{uid}-playhead-keys"
+          onpointerdown={(e) => beginScrub(e, "playhead")}
+          onkeydown={(e) => onTimelineKey(e, "playhead")}
+        >
+          {#each strip as src, i (i)}
+            <img src={src} alt="" draggable="false" />
+          {/each}
+          {#if strip.length === 0}
+            <div class="strip-empty"></div>
+          {/if}
 
-        <div class="mask left" style:width="{pct(inPoint)}%"></div>
-        <div class="mask right" style:width="{100 - pct(effectiveOut)}%"></div>
+          <div class="mask left" style:width="{pct(inPoint)}%"></div>
+          <div class="mask right" style:width="{100 - pct(effectiveOut)}%"></div>
 
-        <div class="playhead" style:left="{pct(playhead)}%"></div>
+          <div class="playhead" style:left="{pct(playhead)}%"></div>
+        </div>
 
-        <button
-          class="handle-bar in"
-          style:left="{pct(inPoint)}%"
-          aria-label="Trim start"
-          onpointerdown={(e) => beginScrub(e, "in")}
-        ></button>
-        <button
-          class="handle-bar out"
-          style:left="{pct(effectiveOut)}%"
-          aria-label="Trim end"
-          onpointerdown={(e) => beginScrub(e, "out")}
-        ></button>
+        <!-- The trim ends sit over the strip rather than inside it. A
+             slider's contents don't count as controls of their own, so inside
+             the playhead they'd be hidden from a screen reader; this layer
+             clips them exactly as the strip did. -->
+        <div class="ends">
+          <div
+            class="handle-bar in"
+            style:left="{pct(inPoint)}%"
+            role="slider"
+            tabindex="0"
+            aria-label="Clip start"
+            aria-valuemin={0}
+            aria-valuemax={Math.max(0, effectiveOut - MIN_CLIP)}
+            aria-valuenow={inPoint}
+            aria-valuetext="{spokenTime(inPoint)}, {formatDuration(trimmed)} selected"
+            onpointerdown={(e) => beginScrub(e, "in")}
+            onkeydown={(e) => onTimelineKey(e, "in")}
+          ></div>
+          <div
+            class="handle-bar out"
+            style:left="{pct(effectiveOut)}%"
+            role="slider"
+            tabindex="0"
+            aria-label="Clip end"
+            aria-valuemin={Math.min(inPoint + MIN_CLIP, duration)}
+            aria-valuemax={duration}
+            aria-valuenow={effectiveOut}
+            aria-valuetext="{spokenTime(effectiveOut)}, {formatDuration(trimmed)} selected"
+            onpointerdown={(e) => beginScrub(e, "out")}
+            onkeydown={(e) => onTimelineKey(e, "out")}
+          ></div>
+        </div>
       </div>
+      <span id="{uid}-playhead-keys" hidden>
+        I and O start and end the clip here.
+      </span>
 
       <div class="times tnum">
         <div class="left-group">
@@ -954,6 +1175,14 @@
     touch-action: none;
   }
 
+  /* The preview clips everything outside the frame, and a crop that fills it
+     would take an outside ring with it, so this one is drawn inside the edge.
+     Square, because the edge is the crop line itself. */
+  .crop:focus-visible {
+    outline-offset: -4px;
+    border-radius: 0;
+  }
+
   .handle {
     position: absolute;
     width: 13px;
@@ -984,6 +1213,12 @@
     bottom: -7px;
     right: -7px;
     cursor: nwse-resize;
+  }
+
+  /* A corner on the frame's edge is mostly cut off, ring and all, so the part
+     that's left lights up too. */
+  .handle:focus-visible {
+    background: var(--text);
   }
 
   .spinner {
@@ -1067,6 +1302,21 @@
     gap: 6px;
   }
 
+  .track {
+    position: relative;
+  }
+
+  /* The strip's own box and clipping, so the trim ends look as they did when
+     they lived inside it. Clicks fall through to the strip except on the ends
+     themselves. */
+  .ends {
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    pointer-events: none;
+  }
+
   .strip {
     position: relative;
     display: flex;
@@ -1129,6 +1379,16 @@
     box-shadow: 0 0 10px rgba(88, 101, 242, 0.7);
     cursor: ew-resize;
     touch-action: none;
+    pointer-events: auto;
+  }
+
+  /* Lit up like a focused crop corner, with the ring drawn inside: the strip
+     clips a handle's top and bottom, and half of it at either end, so a ring
+     outside would barely show — and an accent ring on an accent handle
+     wouldn't show at all. */
+  .handle-bar:focus-visible {
+    background: var(--text);
+    outline-offset: -2px;
   }
 
   .times {

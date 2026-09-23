@@ -108,7 +108,9 @@ it's usually not what you meant — normally you wanted one moment out of it. So
 says so, and offers you three ways on: trim a section, switch to **No limit**, or
 go ahead anyway.
 
-Pasted links still download as normal. It's only the compressing that waits, so
+A long pasted link waits before it downloads, so you can fetch just the part
+you want — it starts from the moment the link was shared at, if it has one —
+rather than an hour of stream to throw most of away. Or download all of it, and
 you arrive in the editor with the video already there.
 
 </td>
@@ -174,8 +176,7 @@ and the video is downloading in the app before you've switched windows.
 &nbsp;&nbsp;
 [![Add to Firefox](https://img.shields.io/badge/Add_to-Firefox-5865F2?style=for-the-badge&logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/firefox/addon/send-to-nitrate/)
 
-<sub>Edge, Brave and other Chromium browsers use the Chrome store.<br>
-Firefox for Android works too.</sub>
+<sub>Edge, Brave and other Chromium browsers use the Chrome store.</sub>
 
 </div>
 
@@ -190,10 +191,15 @@ Three ways to send something, whichever suits the moment:
 Nitrate opens with the video already on its way, and from there it's the app you
 already know — pick a size, or trim out the bit you wanted.
 
-It needs the desktop app above; on its own the extension does nothing. All it
-ever does is hand over an address, to a program on the same machine. It can't
-read the pages you visit, stores nothing and sends nothing anywhere — the
-policy is in [PRIVACY.md](PRIVACY.md), and every line it runs is in
+It needs the desktop app above; on its own the extension does nothing. If the
+button turns amber rather than green, nothing answered — click it again for the
+download page.
+
+All it ever does is hand over an address, to a program on the same machine. On
+the five sites above it looks at the page only to find where its button goes
+and which post's address to send; it remembers one setting, how the button
+looks; and it sends nothing anywhere — the policy is in
+[PRIVACY.md](PRIVACY.md), and every line it runs is in
 [`extension/`](extension).
 
 Rather not install anything? Copying a link and pressing

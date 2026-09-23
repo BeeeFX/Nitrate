@@ -11,7 +11,10 @@ const MENU_LINK = "nitrate-send-link";
 const MENU_PAGE = "nitrate-send-page";
 const MENU_VIDEO = "nitrate-send-video";
 
+const UNANSWERED_TITLE = "Nitrate didn't answer — is the app installed and running?";
+
 chrome.runtime.onInstalled.addListener(() => {
+  if (!chrome.contextMenus) return;
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: MENU_LINK,
@@ -31,11 +34,22 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+// Optional on purpose. Firefox for Android has no context menus at all, and
+// an unguarded call here threw before the toolbar listener below was ever
+// registered — so one missing API took the whole extension down with it. The
+// extension no longer offers itself on Android, but a browser without menus
+// should still get a working toolbar button.
+chrome.contextMenus?.onClicked.addListener(async (info, tab) => {
+  // A streamed video's source is a `blob:` address that only means something
+  // inside that tab — which is every video on the five supported sites — so
+  // it counts as no source at all, and the page (or the embed it sits in)
+  // is sent instead. Passing it on only ever flashed the red "!".
+  const videoSrc = info.srcUrl && isSendable(info.srcUrl) ? info.srcUrl : null;
+
   // Prefer whatever the user actually right-clicked over the page it sits on.
   const target =
     (info.menuItemId === MENU_LINK && info.linkUrl) ||
-    (info.menuItemId === MENU_VIDEO && (info.srcUrl || info.pageUrl)) ||
+    (info.menuItemId === MENU_VIDEO && (videoSrc || info.frameUrl || info.pageUrl)) ||
     info.pageUrl ||
     tab?.url;
 
@@ -55,9 +69,18 @@ async function deliver(url, tabId) {
     await flashBadge("!", "#ED4245");
     return;
   }
+  // The verdict takes a couple of seconds to arrive, and the old instant tick
+  // was only ever a guess. Something has to show in the meantime, or the click
+  // looks ignored; whichever badge comes next replaces this one.
+  await flashBadge("…", "#5865F2", { hold: 10000 });
   try {
-    await sendToApp(url, tabId);
-    await flashBadge("✓", "#43B581");
+    if (await sendToApp(url, tabId)) {
+      await flashBadge("✓", "#43B581");
+    } else {
+      // Not an error — the link went out fine, and nothing took it. Held long
+      // enough to hover over and read why.
+      await flashBadge("?", "#FAA61A", { title: UNANSWERED_TITLE, hold: 8000 });
+    }
   } catch {
     await flashBadge("!", "#ED4245");
   }

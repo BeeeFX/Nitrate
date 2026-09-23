@@ -9,7 +9,7 @@ use nitrate_lib::encode::{
 use nitrate_lib::ffmpeg;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Builds a throwaway clip so the suite doesn't depend on any fixture file.
@@ -276,6 +276,94 @@ fn trimming_buys_quality_at_the_same_target() {
         trimmed.1.height >= full.1.height,
         "trimmed clip should not need a harsher downscale"
     );
+}
+
+/// A phone's portrait clip: landscape frames stored with a quarter-turn flag.
+fn make_rotated_clip(dir: &Path) -> PathBuf {
+    let bins = ffmpeg::resolve();
+    let plain = make_clip(dir, "plain.mp4", "1280x720", 30, 6, 4000);
+    let out = dir.join("portrait.mp4");
+
+    let status = Command::new(&bins.ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-display_rotation", "90", "-i"])
+        .arg(&plain)
+        .args(["-c", "copy"])
+        .arg(&out)
+        .status()
+        .expect("ffmpeg should be available");
+    assert!(status.success(), "failed to build the rotated clip");
+    out
+}
+
+#[test]
+fn a_rotated_clip_is_measured_the_way_up_it_plays() {
+    let dir = temp_dir("rotated");
+    let input = make_rotated_clip(&dir);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    assert_eq!((info.width, info.height), (720, 1280));
+
+    // Most of the width: worked out on the stored 1280x720 this asked for a
+    // crop wider than the upright frame ffmpeg actually filters, and failed.
+    let edits = Edits {
+        crop: Some(CropRect {
+            x: 0.05,
+            y: 0.0,
+            width: 0.9,
+            height: 1.0,
+        }),
+        ..Edits::default()
+    };
+    let set = settings(10_000_000, &dir);
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("a crop inside the frame should encode")
+        .unwrap_or_else(|_| panic!("encode should not be cancelled"));
+
+    let out = ffmpeg::probe(&bins, &outcome.output).expect("output should be readable");
+    assert!(
+        out.height > out.width,
+        "portrait in, portrait out — got {}x{}",
+        out.width,
+        out.height
+    );
+    assert_eq!(
+        (out.width, out.height),
+        (outcome.plan.width, outcome.plan.height),
+        "the plan should describe the file it produced"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn copied_audio_below_the_floor_still_plans() {
+    let dir = temp_dir("quiet-audio");
+    let input = make_clip(&dir, "input.mp4", "640x360", 30, 2, 1000);
+
+    let bins = ffmpeg::resolve();
+    let mut info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    // A long voice memo: little audio, and too long for the target to be
+    // generous. The squeeze used to clamp between a 48k floor and this 32k
+    // ceiling, which panics — and the release build aborts on a panic.
+    info.audio_bitrate_kbps = Some(32);
+    info.duration = 12.0 * 60.0;
+
+    let mut set = settings(10_000_000, &dir);
+    set.audio_codec = AudioCodec::Copy;
+    let result = encode::plan(&info, &set, &Edits::default(), &bins);
+    assert!(result.is_ok(), "expected a plan, got {result:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1022,5 +1110,548 @@ fn every_codec_the_app_offers_gets_a_playable_preview() {
         assert!(made.width > 0 && made.height > 0, "{name}: empty preview");
     }
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Everything in `dir` that the encoder wrote, as opposed to the input.
+fn outputs_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("nitrate"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn two_jobs_with_the_same_name_both_survive() {
+    // Two `clip.mp4`s from different folders, encoding at once into the same
+    // output folder: both used to pick `clip-nitrate.mp4`, and one silently
+    // overwrote the other.
+    let root = temp_dir("same-name");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let inputs: Vec<PathBuf> = ["a", "b"]
+        .iter()
+        .map(|folder| {
+            let dir = root.join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            make_clip(&dir, "clip.mp4", "640x360", 30, 3, 3000)
+        })
+        .collect();
+
+    let handles: Vec<_> = inputs
+        .into_iter()
+        .map(|input| {
+            let out = out.clone();
+            std::thread::spawn(move || {
+                let bins = ffmpeg::resolve();
+                let info = ffmpeg::probe(&bins, &input).unwrap();
+                let set = settings(400_000, &out);
+                let task = encode::Task {
+                    input: &input,
+                    info: &info,
+                    settings: &set,
+                    edits: &Edits::default(),
+                    name_hint: None,
+                };
+                let cancel = Arc::new(AtomicBool::new(false));
+                encode::run_job(&bins, &task, &cancel, |_, _| {})
+                    .expect("encode should not error")
+                    .unwrap_or_else(|_| panic!("not cancelled"))
+                    .output
+            })
+        })
+        .collect();
+    let mut produced: Vec<PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    produced.sort();
+
+    assert_ne!(produced[0], produced[1], "both jobs claimed the same file");
+    assert_eq!(
+        outputs_in(&out),
+        vec!["clip-nitrate-2.mp4", "clip-nitrate.mp4"],
+        "exactly the two finished files, nothing partial"
+    );
+    for path in &produced {
+        let info = ffmpeg::probe(&ffmpeg::resolve(), path).expect("each should be a whole video");
+        assert!(info.duration > 2.0);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_cancelled_encode_leaves_nothing_behind() {
+    let dir = temp_dir("cancelled");
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 20, 6000);
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).unwrap();
+    let mut set = settings(5_000_000, &dir);
+    set.preset = "slow".into();
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancel);
+    let mut seen_partial = false;
+    let result = encode::run_job(&bins, &task, &cancel, |progress, stage| {
+        // Well into the second pass, so a partial file exists by now.
+        if stage == "Encoding" && progress > 0.5 {
+            seen_partial |= outputs_in(&dir).iter().any(|n| n.contains(".partial."));
+            flag.store(true, Ordering::Relaxed);
+        }
+    })
+    .expect("encode should not error");
+
+    assert!(result.is_err(), "should report the cancel");
+    assert!(
+        seen_partial,
+        "the encode should have been writing a partial file"
+    );
+    assert_eq!(outputs_in(&dir), Vec::<String>::new(), "left behind");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reserved_windows_names_get_a_suffix() {
+    assert_eq!(encode::safe_stem("CON"), "CON_");
+    assert_eq!(encode::safe_stem("nul"), "nul_");
+    assert_eq!(encode::safe_stem("Console"), "Console");
+    assert_eq!(encode::safe_stem("COM1"), "COM1_");
+}
+
+/// Runs the bundled ffmpeg with arguments of the test's choosing.
+fn ffmpeg_make(dir: &Path, name: &str, args: &[&str]) -> PathBuf {
+    let out = dir.join(name);
+    let status = Command::new(ffmpeg::resolve().ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(args)
+        .arg(&out)
+        .status()
+        .expect("ffmpeg should run");
+    assert!(status.success(), "building {name} failed");
+    out
+}
+
+/// Encodes `input` with the suite's settings adjusted by `mutate`.
+fn encode_file(
+    input: &Path,
+    edits: Edits,
+    mutate: impl FnOnce(&mut Settings),
+) -> Result<encode::EncodeOutcome, String> {
+    let bins = ffmpeg::resolve();
+    let mut info = ffmpeg::probe(&bins, input).expect("probe should succeed");
+    let mut set = settings(3_000_000, input.parent().unwrap());
+    mutate(&mut set);
+    encode::measure_copied_audio(&bins, input, &mut info, &set);
+    let task = encode::Task {
+        input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .map(|r| r.unwrap_or_else(|_| panic!("not cancelled")))
+}
+
+const TEST_PICTURE: [&str; 4] = [
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc2=size=640x360:rate=24:duration=2",
+];
+
+#[test]
+fn a_small_file_discord_cant_play_is_still_encoded() {
+    let dir = temp_dir("inline");
+    let bins = ffmpeg::resolve();
+    let set = settings(10_000_000, &dir);
+
+    // An iPhone's HEVC .mov, well under the limit.
+    let hevc = ffmpeg_make(
+        &dir,
+        "phone.mov",
+        &[
+            &TEST_PICTURE[..],
+            &["-c:v", "libx265", "-x265-params", "log-level=error"],
+        ]
+        .concat(),
+    );
+    let info = ffmpeg::probe(&bins, &hevc).unwrap();
+    assert!(
+        !encode::can_pass_through(&info, &set, &Edits::default(), &hevc),
+        "HEVC plays as a download link on most Discord clients"
+    );
+
+    // 10-bit H.264 in an MP4: the right codec, a profile browsers won't decode.
+    let ten_bit = ffmpeg_make(
+        &dir,
+        "ten.mp4",
+        &[
+            &TEST_PICTURE[..],
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p10le"],
+        ]
+        .concat(),
+    );
+    let info = ffmpeg::probe(&bins, &ten_bit).unwrap();
+    assert!(!encode::can_pass_through(
+        &info,
+        &set,
+        &Edits::default(),
+        &ten_bit
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hdr_is_tone_mapped_down_to_sdr() {
+    let dir = temp_dir("hdr");
+    let bins = ffmpeg::resolve();
+    let hlg = ffmpeg_make(
+        &dir,
+        "hlg.mp4",
+        &[
+            &TEST_PICTURE[..],
+            &[
+                "-vf",
+                "format=yuv420p10le",
+                "-c:v",
+                "libx265",
+                // In the bitstream, where a camera puts it: the MP4 muxer
+                // drops a transfer set only as an output option.
+                "-x265-params",
+                "log-level=error:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+            ],
+        ]
+        .concat(),
+    );
+    assert!(ffmpeg::probe(&bins, &hlg).unwrap().is_hdr());
+
+    let outcome = encode_file(&hlg, Edits::default(), |_| {}).expect("should encode");
+    let out = ffmpeg::probe(&bins, &outcome.output).unwrap();
+    assert_eq!(out.pix_fmt.as_deref(), Some("yuv420p"));
+    assert_eq!(
+        out.color_transfer.as_deref(),
+        Some("bt709"),
+        "left labelled as HLG, it plays back washed out"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_codec_comes_out_eight_bit_four_two_zero() {
+    // A 4:4:4 screen capture. H.264 and H.265 were already converted; VP9
+    // wasn't, and wrote a profile 1 file most players refuse.
+    let dir = temp_dir("444");
+    let source = ffmpeg_make(
+        &dir,
+        "capture.mp4",
+        &[
+            &TEST_PICTURE[..],
+            &["-c:v", "libx264", "-pix_fmt", "yuv444p"],
+        ]
+        .concat(),
+    );
+    let outcome = encode_file(&source, Edits::default(), |s| {
+        s.video_codec = VideoCodec::Vp9;
+        s.container = Container::Webm;
+        s.audio_codec = AudioCodec::Opus;
+        s.two_pass = false;
+        s.preset = "5".into();
+    })
+    .expect("should encode");
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!(out.pix_fmt.as_deref(), Some("yuv420p"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn surround_sound_becomes_stereo_opus() {
+    let dir = temp_dir("surround");
+    let source = ffmpeg_make(
+        &dir,
+        "film.mkv",
+        &[
+            &TEST_PICTURE[..],
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=5.1(side):sample_rate=48000",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "ac3",
+            ],
+        ]
+        .concat(),
+    );
+    let outcome = encode_file(&source, Edits::default(), |s| {
+        s.video_codec = VideoCodec::Vp9;
+        s.container = Container::Webm;
+        s.audio_codec = AudioCodec::Opus;
+        s.two_pass = false;
+        s.preset = "5".into();
+    })
+    .expect("libopus used to refuse 5.1(side) outright");
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!(out.audio_channels, Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn copying_aac_into_webm_converts_it_instead() {
+    let dir = temp_dir("aac-webm");
+    let source = make_clip(&dir, "input.mp4", "640x360", 24, 2, 800);
+    let outcome = encode_file(&source, Edits::default(), |s| {
+        s.video_codec = VideoCodec::Vp9;
+        s.container = Container::Webm;
+        s.audio_codec = AudioCodec::Copy;
+        s.two_pass = false;
+        s.preset = "5".into();
+    })
+    .expect("WebM can't hold AAC, and asking it to failed the encode");
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!(out.audio_codec.as_deref(), Some("opus"));
+    assert!(
+        outcome
+            .plan
+            .notes
+            .iter()
+            .any(|n| n.contains("re-encoded as Opus")),
+        "should say so: {:?}",
+        outcome.plan.notes
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn copied_audio_is_budgeted_at_what_it_really_is() {
+    // WebM states no bitrate for its streams, and the fallback was the
+    // setting — 128k — whatever the track really spent.
+    let dir = temp_dir("measure");
+    let bins = ffmpeg::resolve();
+    let source = ffmpeg_make(
+        &dir,
+        "loud.webm",
+        &[
+            &TEST_PICTURE[..],
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "anoisesrc=d=2:c=pink",
+                "-ac",
+                "2",
+                "-c:v",
+                "libvpx-vp9",
+                "-deadline",
+                "realtime",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "320k",
+            ],
+        ]
+        .concat(),
+    );
+    let mut info = ffmpeg::probe(&bins, &source).unwrap();
+    assert_eq!(info.audio_bitrate_kbps, None, "WebM shouldn't state one");
+
+    let mut set = settings(3_000_000, &dir);
+    set.audio_codec = AudioCodec::Copy;
+    encode::measure_copied_audio(&bins, &source, &mut info, &set);
+    let kbps = info.audio_bitrate_kbps.expect("should be measured");
+    assert!((200..=400).contains(&kbps), "measured {kbps} kbps");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn keep_mode_trims_past_tracks_an_mp4_cant_hold() {
+    let dir = temp_dir("keep-tracks");
+    let srt = dir.join("subs.srt");
+    std::fs::write(&srt, "1\n00:00:00,000 --> 00:00:01,500\nHello\n").unwrap();
+    // Subtitles, and PCM audio the way cameras record it.
+    let source = ffmpeg_make(
+        &dir,
+        "camera.mkv",
+        &[
+            &TEST_PICTURE[..],
+            &["-f", "lavfi", "-i", "sine=duration=2", "-i"],
+            &[srt.to_str().unwrap()],
+            &[
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-map",
+                "2",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "pcm_s16le",
+                "-c:s",
+                "srt",
+            ],
+        ]
+        .concat(),
+    );
+    let trim = Edits {
+        start: Some(0.5),
+        ..Edits::default()
+    };
+    let outcome = encode_file(&source, trim, |s| s.mode = TargetMode::Keep)
+        .expect("`-map 0` took the subtitles along and the copy failed");
+    assert!(
+        outcome.plan.copy_streams,
+        "the video should still be copied"
+    );
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!(out.audio_codec.as_deref(), Some("aac"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_source_odd_in_both_directions_encodes() {
+    let dir = temp_dir("odd");
+    let source = ffmpeg_make(
+        &dir,
+        "odd.mkv",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=853x481:rate=24:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv444p",
+        ],
+    );
+    let outcome = encode_file(&source, Edits::default(), |_| {})
+        .expect("scale=-2:481 is a height x264 refuses");
+    let out = ffmpeg::probe(&ffmpeg::resolve(), &outcome.output).unwrap();
+    assert_eq!((out.width % 2, out.height % 2), (0, 0));
+    assert_eq!(
+        (out.width, out.height),
+        (outcome.plan.width, outcome.plan.height)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_gpu_encoder_that_fails_hands_over_to_software() {
+    // No GPU here, so NVENC fails the moment it starts — exactly what a
+    // driver reset mid-encode looks like from this side.
+    let dir = temp_dir("gpu-fallback");
+    let input = make_clip(&dir, "input.mp4", "640x360", 24, 2, 800);
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).unwrap();
+    let set = settings(1_000_000, &dir);
+    let mut plan = encode::plan(&info, &set, &Edits::default(), &bins).unwrap();
+    plan.encoder = "h264_nvenc".into();
+
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let outcome = encode::run_planned(&bins, &task, plan, &cancel, |_, _| {})
+        .expect("should finish in software rather than fail")
+        .unwrap_or_else(|_| panic!("not cancelled"));
+    assert_eq!(outcome.plan.encoder, "libx264");
+    assert!(outcome.final_bytes <= 1_000_000);
+    assert!(outcome
+        .plan
+        .notes
+        .iter()
+        .any(|n| n.contains("finished in software")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_filmstrip_comes_back_whole_from_a_few_runs() {
+    let dir = temp_dir("filmstrip");
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 12, 3000);
+    let bins = ffmpeg::resolve();
+
+    // Twelve slices, plus one past the end that can't produce a frame.
+    let mut times: Vec<f64> = (0..12).map(|i| 12.0 * (i as f64 + 0.5) / 12.0).collect();
+    times.push(60.0);
+    let frames = ffmpeg::frames(&bins, &input, &times, 160, &dir);
+
+    assert_eq!(frames.len(), 13);
+    assert!(frames[..12].iter().all(Option::is_some), "{frames:?}");
+    assert!(frames[12].is_none(), "past the end there's nothing to show");
+
+    // Every one a real picture, and not all the same one.
+    let sizes: std::collections::HashSet<u64> = frames[..12]
+        .iter()
+        .flatten()
+        .map(|f| std::fs::metadata(f).unwrap().len())
+        .collect();
+    assert!(sizes.len() > 6, "frames look identical: {sizes:?}");
+
+    // A photo has no timeline to seek along, and still gives its one frame.
+    let photo = ffmpeg_make(
+        &dir,
+        "photo.jpg",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x480",
+            "-frames:v",
+            "1",
+        ],
+    );
+    let still = ffmpeg::frames(&bins, &photo, &[0.02], 160, &dir);
+    assert!(still[0].is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn downloads_are_only_as_tall_as_the_encode_needs() {
+    let dir = temp_dir("download-height");
+    let set = settings(10_000_000, &dir);
+
+    // Ten minutes into 10 MB comes out small; fetching 1080p for it was waste.
+    let ten_minutes = encode::download_height(&set, Some(600.0));
+    assert!(
+        ten_minutes <= 540,
+        "fetched {ten_minutes}p for a 10-minute squeeze"
+    );
+    assert!(ten_minutes >= 360);
+
+    // A short clip can use all of it.
+    assert_eq!(encode::download_height(&set, Some(20.0)), 1080);
+
+    // Nothing is being squeezed, or nobody knows how long it is: full height.
+    let mut quality = set.clone();
+    quality.mode = TargetMode::Quality;
+    assert_eq!(encode::download_height(&quality, Some(600.0)), 1080);
+    let mut held = set.clone();
+    held.auto_compress_downloads = false;
+    assert_eq!(encode::download_height(&held, Some(600.0)), 1080);
+    assert_eq!(encode::download_height(&set, None), 1080);
+
+    // Never above what the user allowed.
+    let mut capped = set.clone();
+    capped.max_download_height = 720;
+    assert_eq!(encode::download_height(&capped, Some(20.0)), 720);
     let _ = std::fs::remove_dir_all(&dir);
 }

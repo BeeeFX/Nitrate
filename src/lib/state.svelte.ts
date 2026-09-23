@@ -472,6 +472,7 @@ class AppStore {
       knownDuration: null,
       settings: null,
       heldReason: null,
+      section: null,
       groupId: null,
       groupTitle: null,
       mediaKind: null,
@@ -488,7 +489,11 @@ class AppStore {
    */
   #shouldHoldBack(job: Job): boolean {
     if (this.settingsFor(job).mode !== "size") return false;
-    return (job.knownDuration ?? 0) > LONG_VIDEO_SECONDS;
+    // A part chosen from a long link is judged by the part.
+    const length = job.section
+      ? job.section.end - job.section.start
+      : (job.knownDuration ?? 0);
+    return length > LONG_VIDEO_SECONDS;
   }
 
   /** Drains links that arrived from a browser via `nitrate://`. */
@@ -526,10 +531,17 @@ class AppStore {
       job.knownDuration = info.duration;
       job.stage = "Ready";
 
-      // Long recordings download as normal — `start` sees the duration and
-      // stops before compressing, leaving a file ready to trim.
+      // A long recording waits before downloading, not after. Most of a
+      // two-hour stream is usually not what anyone wanted, and fetching all of
+      // it to trim it down costs gigabytes and minutes; the card offers the
+      // part instead, or all of it as before. That goes for links from the
+      // browser too, which wait for a click anyway.
       const auto = opts?.autoStart ?? this.autoStart;
-      if (auto) {
+      if (this.#shouldHoldBack(job)) {
+        job.status = "held";
+        job.heldReason = "long";
+        job.stage = "Waiting for you";
+      } else if (auto) {
         await this.start(id);
       } else {
         job.status = "held";
@@ -595,7 +607,16 @@ class AppStore {
         }
 
         job.stage = "Ready";
-        if (this.autoStart) await this.start(job.id);
+        if (this.autoStart) {
+          await this.start(job.id);
+        } else {
+          // Held, not left as "queued". Queued means Rust has it, so a job
+          // left there showed a Cancel button with nothing to cancel, no way
+          // to start it, and kept "1 in progress" — and the update's Restart
+          // — waiting on it forever.
+          job.status = "held";
+          job.heldReason = "manual";
+        }
       } catch (err) {
         job.status = "failed";
         job.stage = "Failed";
@@ -639,18 +660,25 @@ class AppStore {
     }
   }
 
-  /** Re-previews every idle job after a settings change. */
+  /**
+   * Re-previews every idle job after a settings change.
+   *
+   * Held jobs only: a queued one has already been sent with the settings it
+   * had, so a fresh plan would describe an encode that isn't going to happen.
+   */
   async refreshPlans() {
     await Promise.all(
       this.jobs
-        .filter((j) => j.status === "queued" && j.info)
+        .filter((j) => j.status === "held" && j.info)
         .map((j) => this.#loadPlan(j)),
     );
   }
 
   async start(id: string) {
     const job = this.#find(id);
-    if (!job) return;
+    // Sending a running job again would encode it twice, and Rust would lose
+    // the first copy's cancel flag in the process.
+    if (!job || job.status === "running") return;
 
     job.status = "queued";
     job.heldReason = null;
@@ -676,11 +704,21 @@ class AppStore {
         title: job.name,
         settings,
         edits: $state.snapshot(job.edits),
+        // Only until it's fetched: after that the file is the part.
+        section: job.kind === "url" && !job.path ? $state.snapshot(job.section) : null,
       });
     } catch (err) {
       job.status = "failed";
       job.error = String(err);
     }
+  }
+
+  /** Downloads only this stretch of a link, in seconds. */
+  async startPart(id: string, start: number, end: number) {
+    const job = this.#find(id);
+    if (!job || job.kind !== "url" || !(end > start)) return;
+    job.section = { start, end };
+    await this.start(id);
   }
 
   async cancel(id: string) {
@@ -689,7 +727,7 @@ class AppStore {
 
   async startAll() {
     for (const job of this.jobs) {
-      if (job.status === "queued" || job.status === "failed" || job.status === "cancelled") {
+      if (job.status === "held" || job.status === "failed" || job.status === "cancelled") {
         await this.start(job.id);
       }
     }

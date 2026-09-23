@@ -88,7 +88,7 @@ WHAT IT DOES
 The button is styled to match each site's own controls, and can be set to show
 its mark alone if you'd rather it stayed quiet.
 
-That's the whole extension. It hands an address to a program on your own computer and stops there.
+That's the whole extension. It hands an address to a program on your own computer and stops there. If nothing answers — usually because the app isn't installed — the button turns amber instead of green, and clicking it again opens the download page.
 
 REQUIRES THE DESKTOP APP
 
@@ -101,15 +101,15 @@ Nitrate compresses video to a chosen file size, for sharing somewhere with an up
 PRIVACY
 
 • No analytics, no telemetry, no account
-• Reads no page content beyond the link address a button belongs to
-• Stores nothing, locally or remotely
-• Sends nothing over the internet — the address travels from your browser to a program on the same machine, and nowhere else
+• On YouTube, X, Instagram, Reddit and Twitch, reads the page only to find where its button goes, how the site's own buttons look, and which post's address to send — none of it is kept or sent anywhere
+• Stores one setting, how the button looks, which your browser's own sync carries to your other devices if you have it turned on
+• Sends nothing of its own over the internet — the address travels from your browser to a program on the same machine, and nowhere else
 
 Full policy: https://github.com/BeeeFX/Nitrate/blob/main/PRIVACY.md
 
 OPEN SOURCE
 
-Every line is public and the shipped files are the repository files, unmodified:
+Every line is public. The scripts and options page in the package are the repository's own files, unmodified; the build only picks the right manifest for each browser, sets its version number, and draws the icons:
 
 https://github.com/BeeeFX/Nitrate/tree/main/extension
 ```
@@ -164,17 +164,17 @@ Reads the address of the tab the user is currently on, so that address can be ha
 
 `scripting`
 ```
-Used solely to open a "nitrate://" link in the current tab, which is the mechanism that passes the URL to the desktop application. The injected function does nothing but set the location to that link. No page data is read, stored or modified.
+Used solely to open a "nitrate://" link in the current tab, which is the mechanism that passes the URL to the desktop application. The injected function sets the location to that link, then waits up to two and a half seconds for the page to lose focus — the desktop application coming to the front — so the toolbar icon can say whether the application answered. No page data is read, stored or modified.
 ```
 
 `storage`
 ```
-Stores one setting, chosen by the user on the options page: whether the injected button shows its icon alone or its icon and name. No user data of any kind is stored.
+Stores one setting, chosen by the user on the options page: whether the injected button shows its icon alone or its icon and name. It is kept in storage.sync, so the browser's own sync carries it to the user's other devices if they have sync turned on. No user data of any kind is stored.
 ```
 
 **Host permission justification** _(youtube.com, x.com, twitter.com, instagram.com, reddit.com, twitch.tv)_
 ```
-A content script adds a "Send to Nitrate" button into the page on these five sites, next to the existing share controls. To send the correct link, it reads the address of the specific post or video the button belongs to — for example the permalink of a tweet in a timeline. Nothing else on the page is read, and no page content is stored or transmitted anywhere.
+A content script adds a "Send to Nitrate" button into the page on these five sites, next to the existing share controls. To do that it reads the page's markup to find the row of share controls, and the computed style of the site's own buttons so that its button matches them. To send the correct link, it reads the address of the specific post or video the button belongs to — for example the permalink of a tweet in a timeline. All of this is used on the spot inside the browser; no page content is stored or transmitted anywhere.
 ```
 
 **Are you using remote code?**
@@ -224,9 +224,22 @@ No, this add-on does not require data collection
 Mozilla now requires every add-on to say so explicitly, and an upload without
 the declaration fails validation with *"The `data_collection_permissions`
 property is missing"*. Ours declares `{ "required": ["none"] }`, which is the
-formal way of saying it collects nothing at all. Note that this key only exists
-from Firefox 140, which is why the add-on's minimum version is 140 (142 on
-Android) rather than something older.
+formal way of saying it collects nothing at all. The key exists from Firefox
+140, and from 142 on Android.
+
+**Compatibility** — Firefox only. Leave **Firefox for Android** unticked, and
+untick it if a previous version had it. The extension hands links to a desktop
+application that can't run on a phone, so there it could only ever fail, and
+Android's Firefox has no right-click menus for it to add to either. The
+manifest has no `gecko_android` section for the same reason.
+
+That's also why the minimum version is 142 rather than 140. The linter can't be
+told an add-on isn't for Android — it checks every manifest against Firefox for
+Android regardless, using the desktop minimum when there's no Android one — so
+at 140 it warns that Android 140 predates `data_collection_permissions`. With
+only the one minimum to go on, raising it to 142 clears the warning, at the
+cost of Firefox 140 and 141 on the desktop: in practice, the tail end of ESR
+140.
 
 **Name**
 
@@ -285,17 +298,19 @@ First release. Adds a "Send to Nitrate" button on YouTube, X, Instagram, Reddit 
 AMO reviews source, so this saves a round trip:
 
 ```
-This extension is a thin bridge to a desktop application. Its whole interface is one injected button, one context-menu entry, and an options page with a single setting. It performs no network activity whatsoever.
+This extension is a thin bridge to a desktop application. Its whole interface is one injected button, three context-menu entries (link, video and page), a toolbar button, and an options page with a single setting. It performs no network activity of its own.
 
 HOW IT WORKS
 Clicking the button (or the context-menu entry) opens a "nitrate://" link in the current tab. That is a custom URL scheme registered by the Nitrate desktop application, which is what actually fetches and compresses the video. The extension's entire job is constructing that link and opening it.
 
+Browsers give no sign of whether anything handled the link, so the extension watches for the page losing focus over the next two and a half seconds — the application brings its window forward when it receives a link. If that doesn't happen, the button (or the toolbar badge) says the application didn't answer, and a second click on the button opens the application's download page on GitHub in a new tab. On a page that doesn't accept injected scripts, such as the PDF viewer, the link is opened in a new tab instead, which closes once the application has answered or after fifteen seconds.
+
 SOURCE CODE
-Not minified, obfuscated or transpiled. The files in the package are the files in the repository, byte for byte:
+Not minified, obfuscated or transpiled. The scripts and the options page in the package are the repository's files, unchanged:
 
   https://github.com/BeeeFX/Nitrate/tree/main/extension
 
-The build step (scripts/build-extension.mjs) only copies src/ and selects the correct manifest — Chrome needs a service worker, Firefox needs background scripts. Reproduce with:
+The build step (scripts/build-extension.mjs) copies src/, selects the correct manifest — Chrome needs a service worker, Firefox needs background scripts — and sets its version to the application's. The icons are rendered from assets/icon.svg. Nothing else is generated or changed. Reproduce with:
 
   git clone https://github.com/BeeeFX/Nitrate
   npm install
@@ -305,9 +320,9 @@ REMOTE CODE
 None. No eval, no remotely hosted scripts, no dynamic imports.
 
 DATA
-Nothing is collected or transmitted. The content script reads only the href of the post a button was added to, so the correct link is sent rather than the page's own address.
+Nothing is collected or transmitted. On the five supported sites the content script reads the page's markup to find the row of share controls, the computed style of the site's own buttons so that its own matches them, and the href of the post a button was added to, so the correct link is sent rather than the page's own address. All of it is used on the spot and none of it is kept.
 
-The only use of storage is one preference, set by the user on the options page: whether the injected button shows its icon alone or its icon and name. It is written to storage.sync as a single string ("auto", "icon" or "label"). No user data of any kind is stored.
+The only use of storage is one preference, set by the user on the options page: whether the injected button shows its icon alone or its icon and name. It is written to storage.sync as a single string ("auto", "icon" or "label"), which Firefox Sync carries between the user's own devices if they use it. No user data of any kind is stored.
 
 COMPANION APPLICATION
 The desktop app is open source and MIT licensed: https://github.com/BeeeFX/Nitrate

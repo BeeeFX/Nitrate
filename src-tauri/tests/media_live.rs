@@ -45,7 +45,8 @@ fn a_youtube_video_survives_a_refused_format_url() {
         // though YouTube offers it at 2048x858.
         "https://www.youtube.com/watch?v=eb8ipCfkIdE",
         &dir,
-        1080,
+        &|_| 1080,
+        None,
         &cancel,
         |_| {},
     )
@@ -88,7 +89,8 @@ fn an_instagram_carousel_comes_back_as_separate_items() {
         &bins,
         "https://www.instagram.com/p/DbqvFwciSjr/",
         &dir,
-        1080,
+        &|_| 1080,
+        None,
         &cancel,
         |_| {},
     )
@@ -160,7 +162,8 @@ fn an_x_gif_comes_back_as_a_real_gif() {
         &bins,
         "https://x.com/BlazeBinges/status/2084677139195150496",
         &dir,
-        1080,
+        &|_| 1080,
+        None,
         &cancel,
         |_| {},
     )
@@ -279,7 +282,8 @@ fn a_reddit_gallery_gives_up_every_image() {
         &bins,
         "https://www.reddit.com/r/interesting/comments/1vjv949/i_have_this_optical_illusion_since_many_years_ago/",
         &dir,
-        1080,
+        &|_| 1080,
+        None,
         &cancel,
         |_| {},
     )
@@ -325,7 +329,8 @@ fn a_reddit_gif_stays_a_gif() {
         &bins,
         "https://www.reddit.com/r/gifs/comments/1luldoo/showing_off_some_tricks/",
         &dir,
-        1080,
+        &|_| 1080,
+        None,
         &cancel,
         |_| {},
     )
@@ -373,7 +378,8 @@ fn a_reddit_photo_post_comes_back_as_an_image() {
         &bins,
         "https://www.reddit.com/r/dijondijon/comments/1vipx0d/jane_remover_samples_talk_down/",
         &dir,
-        1080,
+        &|_| 1080,
+        None,
         &cancel,
         |_| {},
     )
@@ -428,7 +434,8 @@ fn an_x_photo_post_comes_back_through_gallery_dl() {
         &bins,
         "https://x.com/i/status/2085248162445373578",
         &dir,
-        1080,
+        &|_| 1080,
+        None,
         &cancel,
         |_| {},
     )

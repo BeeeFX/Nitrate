@@ -1,6 +1,6 @@
 # Privacy Policy
 
-_Last updated: 16 August 2026_
+_Last updated: 23 September 2026_
 
 This covers the **Nitrate** desktop application and the **Send to Nitrate**
 browser extension.
@@ -16,13 +16,39 @@ The extension does one thing: when you click its button or choose it from the
 right-click menu, it hands the address of the page or link you chose to the
 Nitrate desktop application on the same computer, using a `nitrate://` link.
 
-- It does not read page content.
-- It does not track which pages you visit.
-- It does not store anything, locally or remotely.
-- It does not send anything over the internet.
+What it reads:
 
-The URL you select never leaves your machine — it travels from the browser to a
-program on the same computer, and nowhere else.
+- **On YouTube, X, Instagram, Reddit and Twitch**, it reads the page's markup
+  to work out where its button goes and which post or video each button
+  belongs to — so that, in a feed, it sends the address of the post you
+  clicked rather than the feed's. It also reads how the site's own buttons are
+  styled, so that its button can match them. This happens inside your browser,
+  is used on the spot, and is never kept or sent anywhere.
+- **On any other site**, it reads nothing unless you use its right-click entry
+  or its toolbar button, and then only the address of the page or link you
+  chose.
+
+What it stores:
+
+- **One display preference**: whether its button shows the Nitrate mark alone
+  or the mark and the name. It's kept in the browser's extension storage. If
+  you have browser sync turned on, your browser copies it to your other
+  signed-in devices through its own sync service, as it does your other
+  settings; nothing belonging to this project is involved.
+- Nothing else — no history of what you've sent, and no record of the pages
+  you visit.
+
+What it sends:
+
+- The address you chose, to the Nitrate application. It travels from the
+  browser to a program on the same computer, and nowhere else.
+- Nothing of its own over the internet, and no analytics or telemetry of any
+  kind.
+
+If the application doesn't answer — usually because it isn't installed — the
+button offers to open the application's download page. That's an ordinary
+visit to GitHub, made only if you click, and it carries nothing from the page
+you were on.
 
 ## The desktop application
 

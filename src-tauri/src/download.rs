@@ -5,6 +5,7 @@
 //! the background. That costs nothing in practice: you can only use it when
 //! you're online anyway.
 
+use crate::children::Spawn;
 use crate::ffmpeg::Binaries;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
@@ -244,9 +245,23 @@ pub fn ensure_quickjs(data_dir: &Path) -> Result<PathBuf, String> {
 }
 
 fn base_command(program: &Path) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+/// yt-dlp, deaf to whatever configuration the user already has.
+///
+/// yt-dlp reads `%APPDATA%\yt-dlp\config` and `~/yt-dlp.conf` on its own, and
+/// the people most likely to have one are the people who already use it. `-x`
+/// in there turned every download into an audio file ffprobe then rejected,
+/// and `--download-archive` skipped anything fetched before — exiting cleanly
+/// with no file, and filing Nitrate's downloads in their archive besides.
+pub(crate) fn yt_dlp_command(bin: &Path) -> Command {
+    let mut cmd = base_command(bin);
+    cmd.arg("--ignore-config");
     cmd
 }
 
@@ -254,36 +269,153 @@ fn base_command(program: &Path) -> Command {
 // Getting hold of yt-dlp
 // ---------------------------------------------------------------------------
 
-/// Downloads yt-dlp if it's missing. Returns the path either way.
-pub fn ensure(data_dir: &Path, mut on_progress: impl FnMut(f64)) -> Result<PathBuf, String> {
-    let target = binary_path(data_dir);
-    if target.is_file() {
-        return Ok(target);
-    }
+/// yt-dlp's release signing key — Simon Sawicki's, fingerprint
+/// AC0C BBE6 848D 6A87 3464 AF4E 57CF 6593 3B5A 7581 — from `public.key` in
+/// its repository. Every release since 2023 signs its checksums with it.
+///
+/// Pinned rather than fetched, because a key fetched from the same place as
+/// the release vouches for nothing. If yt-dlp ever moves to a new key, links
+/// stop working until Nitrate ships it, and say so; that beats running
+/// whatever was uploaded.
+const YT_DLP_KEY_MODULUS: &str = concat!(
+    "f4ac5f738c63c0b74b6196de42d5e6f371c0155fb35bd6ff9ea908e4f9611975",
+    "31135428375803399e002b947766fdf66acd480efa9018ac1eb418a7a0edf7d4",
+    "0dff92d1714a11975e44b61e01aaaa2a14a26d56a50e3bce04ecedbb75bad3b1",
+    "cb113400a80ef04cfb88b765aa9a92fad0d21ccabdbb2f1aa681d37798dbd9da",
+    "22cef9b3f49ca47f0be3e013d1f8cadcb00dad76cccc7a3e66429d538e3aee97",
+    "644166754c71750f5f143a9df4b701298d8b0ce712628d6c698d185a26561edc",
+    "d5a19bb590ece39d2e458eaff204724b2260c7ee93711e6eecfcf9dababa6640",
+    "5b4316bba4b7eda58439e9294986aff23fdc81ea1ff5fef673e84b8ba2a90e47",
+    "a5b941f012bee167e96a2120ef92e7bee38f7d920f298c976bfd00ed0a233308",
+    "0eac3f3ca334fe54290a92427e8a35d9ee01cd8e670169474a2bb7c320439823",
+    "adcbc9ce905a41904e28057df4945d61c308ef5a5cd84fdde8ea15680632d094",
+    "b2b6e4709916b9663bab9011cbfd391db48cdcae0353d7aab67c66895d5643c9",
+    "d7b88f49809411be1e4f4e49f2e4bb71ab3726aaf58ef538c705baecd7804f10",
+    "ef5f717c4a2ff08505bcd70d2bef02002b76aaa53289dc43fca271395f2faab3",
+    "27c10a162a96d7840c4dd027e92bae653a1d5c24e2227c284fb5a38ee14f28a7",
+    "6f7c7d463f86e7a9dcd39f32f10920c812d7f27cfb085fef4623b26493fcd98d",
+);
 
+const YT_DLP_KEY: crate::signature::RsaKey = crate::signature::RsaKey {
+    modulus: YT_DLP_KEY_MODULUS,
+    exponent: 65537,
+};
+
+const RELEASES: &str = "https://github.com/yt-dlp/yt-dlp/releases";
+
+/// Held while yt-dlp is being installed or replaced.
+///
+/// The first link pasted, each worker, and the startup refresh can all find
+/// yt-dlp missing or stale at once, and they shared one `.part` file — and a
+/// late rename over a copy that had started running fails on Windows.
+static INSTALLING: Mutex<()> = Mutex::new(());
+
+fn version_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("bin").join("yt-dlp.version")
+}
+
+fn client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .user_agent("nitrate")
+        .https_only(true)
+        .build()
+        .map_err(|e| format!("Couldn't start the download: {e}"))
+}
+
+/// The newest release's tag, read from where GitHub redirects a download.
+///
+/// Everything after is fetched from that tag, not from `latest`: a release
+/// published halfway through would otherwise pair one version's checksums
+/// with another's binary.
+fn latest_tag() -> Result<String, String> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("nitrate")
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Couldn't start the download: {e}"))?
+        .head(format!("{RELEASES}/latest/download/SHA2-256SUMS"))
+        .send()
+        .map_err(|e| format!("Couldn't reach GitHub to fetch the downloader: {e}"))?;
+
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or("GitHub didn't say which yt-dlp is the latest.")?;
+    let tag = location
+        .strip_prefix(&format!("{RELEASES}/download/"))
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("");
+    if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        return Err("GitHub pointed somewhere unexpected for the latest yt-dlp.".into());
+    }
+    Ok(tag.to_string())
+}
+
+/// Fetches, checks and installs one release of yt-dlp.
+///
+/// It used to be whatever `latest` served, run unchecked, and kept current by
+/// its own `--update` — which compares against checksums from the same
+/// release, so a tampered release would have passed that too. Now the
+/// checksums must carry yt-dlp's signature, made with the key pinned above,
+/// and the binary must match them before it's ever run.
+fn install(
+    data_dir: &Path,
+    tag: &str,
+    mut on_progress: impl FnMut(f64),
+) -> Result<PathBuf, String> {
+    let target = binary_path(data_dir);
     let dir = target
         .parent()
         .ok_or("Couldn't work out where to put the downloader.")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
 
-    let url = format!(
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/{}",
-        asset_name()
-    );
+    let small = client(Duration::from_secs(60))?;
+    let fetch = |client: &reqwest::blocking::Client, name: &str| {
+        client
+            .get(format!("{RELEASES}/download/{tag}/{name}"))
+            .send()
+            .map_err(|e| format!("Couldn't reach GitHub to fetch the downloader: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("GitHub refused the downloader request: {e}"))?
+            .bytes()
+            .map_err(|e| format!("The downloader transfer failed: {e}"))
+    };
 
     on_progress(0.0);
-    let bytes = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .user_agent("nitrate")
-        .build()
-        .map_err(|e| format!("Couldn't start the download: {e}"))?
-        .get(&url)
-        .send()
-        .map_err(|e| format!("Couldn't reach GitHub to fetch the downloader: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("GitHub refused the downloader request: {e}"))?
-        .bytes()
-        .map_err(|e| format!("The downloader transfer failed: {e}"))?;
+    let sums = fetch(&small, "SHA2-256SUMS")?;
+    let signature = fetch(&small, "SHA2-256SUMS.sig")?;
+    crate::signature::verify(&sums, &signature, &YT_DLP_KEY).map_err(|why| {
+        format!(
+            "yt-dlp {tag} isn't signed the way its releases are ({}). Nothing was installed. \
+             If this keeps happening, Nitrate needs an update.",
+            why.trim_end_matches('.').to_lowercase()
+        )
+    })?;
+
+    let expected = String::from_utf8_lossy(&sums)
+        .lines()
+        .find_map(|line| {
+            let (hash, name) = line.split_once(char::is_whitespace)?;
+            (name.trim().trim_start_matches('*') == asset_name()).then(|| hash.to_lowercase())
+        })
+        .ok_or_else(|| format!("yt-dlp {tag} doesn't list a build for this system."))?;
+
+    on_progress(0.1);
+    let bytes = fetch(&client(Duration::from_secs(300))?, asset_name())?;
+    {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        if digest != expected {
+            return Err(format!(
+                "The downloader didn't match its signed checksum (expected {expected}, got \
+                 {digest}). Nothing was installed."
+            ));
+        }
+    }
 
     // Write beside the target then rename, so an interrupted fetch can't leave
     // a half-written binary that looks installed.
@@ -296,11 +428,30 @@ pub fn ensure(data_dir: &Path, mut on_progress: impl FnMut(f64)) -> Result<PathB
         let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755));
     }
 
-    std::fs::rename(&temp, &target).map_err(|e| format!("Couldn't install the downloader: {e}"))?;
+    std::fs::rename(&temp, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("Couldn't install the downloader: {e}")
+    })?;
+    let _ = std::fs::write(version_path(data_dir), tag);
     touch_stamp(data_dir);
     on_progress(1.0);
 
     Ok(target)
+}
+
+/// Downloads yt-dlp if it's missing. Returns the path either way.
+pub fn ensure(data_dir: &Path, on_progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+    let target = binary_path(data_dir);
+    if target.is_file() {
+        return Ok(target);
+    }
+
+    let _installing = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
+    // Someone else may have finished installing while we waited.
+    if target.is_file() {
+        return Ok(target);
+    }
+    install(data_dir, &latest_tag()?, on_progress)
 }
 
 fn touch_stamp(data_dir: &Path) {
@@ -330,28 +481,39 @@ fn is_stale(data_dir: &Path) -> bool {
     now.saturating_sub(then) > REFRESH_AFTER.as_secs()
 }
 
-/// Asks yt-dlp to update itself, but only if it hasn't been checked recently.
+/// Replaces yt-dlp with the newest signed release, if it hasn't been checked
+/// recently and there's a newer one.
 ///
 /// Failure is deliberately silent — a stale downloader still works for most
-/// sites, and this runs in the background where there's nobody to tell.
+/// sites, and this runs in the background where there's nobody to tell. A
+/// copy that's busy downloading can't be replaced on Windows; the stamp is
+/// left alone then, so the next launch tries again.
 pub fn refresh_if_stale(data_dir: &Path) {
     let bin = binary_path(data_dir);
     if !bin.is_file() || !is_stale(data_dir) {
         return;
     }
+    let Ok(tag) = latest_tag() else {
+        return;
+    };
 
-    let ok = base_command(&bin)
-        .arg("--update")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if ok {
+    let installed = std::fs::read_to_string(version_path(data_dir))
+        .ok()
+        .or_else(|| {
+            // Installed before versions were recorded: ask it.
+            let output = yt_dlp_command(&bin)
+                .arg("--version")
+                .output_contained()
+                .ok()?;
+            Some(String::from_utf8_lossy(&output.stdout).into_owned())
+        });
+    if installed.as_deref().map(str::trim) == Some(tag.as_str()) {
         touch_stamp(data_dir);
+        return;
     }
+
+    let _installing = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = install(data_dir, &tag, |_| {});
 }
 
 // ---------------------------------------------------------------------------
@@ -501,8 +663,10 @@ struct DumpJson {
     duration: Option<f64>,
     extractor_key: Option<String>,
     webpage_url: Option<String>,
+    /// Sites report `null` here as often as `false`, and `default` covers a
+    /// missing key but not a null one.
     #[serde(default)]
-    is_live: bool,
+    is_live: Option<bool>,
 }
 
 /// Spaces out metadata requests so we don't rate-limit ourselves.
@@ -551,7 +715,7 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
 
     pace();
 
-    let mut child = base_command(bin)
+    let mut child = yt_dlp_command(bin)
         // Warnings are left on deliberately. yt-dlp announces a missing
         // JavaScript runtime as a warning, not an error, and silencing it hid
         // the one line that explained a whole class of YouTube failures.
@@ -570,7 +734,7 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_contained()
         .map_err(|e| format!("Couldn't run the downloader: {e}"))?;
 
     // Drained on a thread rather than left in the pipe. A post with several
@@ -662,8 +826,9 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
 
     let parsed: DumpJson = serde_json::from_str(&stdout)
         .map_err(|_| "The downloader returned something unexpected for that link.".to_string())?;
+    crate::media::remember_probe(url, &stdout);
 
-    if parsed.is_live {
+    if parsed.is_live == Some(true) {
         return Err("That's a live stream — it has no fixed length to compress.".into());
     }
 
@@ -753,15 +918,10 @@ pub fn fetch(
     // *and still exits zero*, leaving separate video and audio files behind.
     let ffmpeg_path = bins.ffmpeg.clone();
 
-    let format = format!(
-        "bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
-        h = max_height
-    );
-
-    let mut child = base_command(bin)
+    let mut child = yt_dlp_command(bin)
         .args(["--no-playlist", "--newline"])
         .args(["--socket-timeout", "20", "--retries", "3"])
-        .args(["-f", &format])
+        .args(format_args(max_height))
         .args(["--merge-output-format", "mp4"])
         // A fixed output name means we don't have to parse yt-dlp's filename
         // rules to find what it produced.
@@ -770,15 +930,12 @@ pub fn fetch(
         .arg(&ffmpeg_path)
         // Machine-readable progress on stdout, rather than scraping the
         // human-facing progress bar.
-        .args([
-            "--progress-template",
-            "download:NITRATE|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
-        ])
+        .args(["--progress-template", PROGRESS_TEMPLATE])
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_contained()
         .map_err(|e| format!("Couldn't start the downloader: {e}"))?;
 
     let stderr_tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -829,8 +986,29 @@ pub fn fetch(
     find_downloaded(work_dir).map(Ok)
 }
 
+/// Best video and audio no larger than `res`, where res is the short side.
+///
+/// It was `bv*[height<=h]`, which caps the wrong side of a vertical video: a
+/// 1080p Short is 1080x1920, so a 1080 cap passed it over for 480x854. And a
+/// format with no stated height fails `height<=` outright, so it fell to the
+/// uncapped fallback — which on some sites was 4K. Sorting by resolution
+/// instead prefers the largest that fits, whichever way up, and ranks unknown
+/// sizes last rather than letting them skip the limit.
+pub(crate) fn format_args(res: u32) -> [String; 4] {
+    [
+        "-f".into(),
+        "bv*+ba/b".into(),
+        "-S".into(),
+        format!("res:{res}"),
+    ]
+}
+
+/// Machine-readable progress on stdout, rather than scraping the human-facing
+/// progress bar. Pair with `--newline` and read with `parse_progress`.
+pub(crate) const PROGRESS_TEMPLATE: &str = "download:NITRATE|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s";
+
 /// `download:NITRATE|<done>|<total>|<estimate>`
-fn parse_progress(line: &str) -> Option<f64> {
+pub(crate) fn parse_progress(line: &str) -> Option<f64> {
     let rest = line.trim().strip_prefix("NITRATE|")?;
     let mut parts = rest.split('|');
     let done: f64 = parts.next()?.trim().parse().ok()?;

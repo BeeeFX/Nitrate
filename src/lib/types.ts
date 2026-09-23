@@ -136,10 +136,16 @@ export interface Job {
    */
   knownDuration: number | null;
   /**
-   * Why a held job is waiting. The two reasons need different explanations —
-   * one is about length, the other about where the link came from.
+   * Why a held job is waiting. The reasons need different explanations — one
+   * is about length, one about where the link came from, and "manual" is
+   * simply "Start automatically" being off.
    */
-  heldReason: "long" | "browser" | null;
+  heldReason: "long" | "browser" | "manual" | null;
+  /**
+   * For a link: only this stretch of it, in seconds, when a part was chosen
+   * instead of the whole thing.
+   */
+  section: { start: number; end: number } | null;
   /**
    * Per-video overrides set in the editor. Null means "whatever the main
    * interface says", so changing the target there still moves everything that
