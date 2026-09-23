@@ -41,6 +41,10 @@ reqwest = { version = "0.13", default-features = false, features = [
 tauri-plugin-drag = "2.1.1"
 sha2 = "0.10.9"
 
+[target.'cfg(unix)'.dependencies]
+# Ending a helper's whole process group on cancel. Already in the tree.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4.1"
 # Hides the console window that would otherwise flash on every ffmpeg invocation.

@@ -816,6 +816,14 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
                 |p| emit(0.05 + p * 0.40, "Downloading"),
             );
 
+            // Pressed while the last bytes were arriving is still pressed. A
+            // download that finished anyway used to be moved into Downloads
+            // and reported done, minutes after the user had cancelled it.
+            let fetched = match fetched {
+                Ok(Ok(_)) if cancel.load(Ordering::Relaxed) => Ok(Err(ffmpeg::Cancelled)),
+                other => other,
+            };
+
             // A post holding several things becomes several jobs. They're
             // moved out of the temp folder first, because this one is about to
             // be deleted and the frontend is about to be handed the paths.
@@ -890,6 +898,15 @@ fn process_job(app: &AppHandle, job: QueuedJob) {
             return;
         }
     };
+
+    // The last chance before a file is placed without encoding — a download
+    // held back for trimming, or one that already fits — to notice a cancel.
+    if cancel.load(Ordering::Relaxed) {
+        cleanup(&work_dir);
+        let _ = app.emit("job://cancelled", CancelledEvent { id: id.clone() });
+        finish(app);
+        return;
+    }
 
     // Two ways to skip encoding: the file already fits, or it came from a link
     // and the user asked to be left alone with it.

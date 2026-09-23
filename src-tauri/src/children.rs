@@ -22,8 +22,11 @@
 //! with it — the update installer, which has to outlive us by design, and
 //! whatever player "Play" opened.
 //!
-//! Elsewhere this is plain process spawning: the shipped build is Windows,
-//! and there the problem is real.
+//! Elsewhere each helper leads a process group of its own, so a cancel can
+//! still end the tree: yt-dlp's standalone build unpacks itself and runs as a
+//! parent and a child, and killing only the parent left the child downloading.
+//! Nothing there ties the tree to the app's own exit — the shipped build is
+//! Windows, and that's where it's handled.
 
 use std::io;
 use std::ops::{Deref, DerefMut};
@@ -42,6 +45,13 @@ impl Contained {
         #[cfg(windows)]
         if let Some(job) = &self.job {
             job.terminate();
+        }
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(self.child.id()) {
+            // The negative pid names the group the child leads.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
         }
         self.child.kill()
     }
@@ -85,6 +95,8 @@ pub trait Spawn {
 
 impl Spawn for Command {
     fn spawn_contained(&mut self) -> io::Result<Contained> {
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(self, 0);
         let child = self.spawn()?;
         #[cfg(windows)]
         let job = job::Job::holding(&child);

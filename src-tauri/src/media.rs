@@ -28,6 +28,7 @@
 use crate::children::Spawn;
 use crate::ffmpeg::{Binaries, Cancelled};
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,6 +79,8 @@ pub struct MediaItem {
 
 #[derive(Deserialize)]
 struct Entry {
+    #[serde(default)]
+    is_live: Option<bool>,
     #[serde(default)]
     formats: Vec<Format>,
     #[serde(default)]
@@ -196,6 +199,93 @@ fn run_capped(cmd: &mut Command, limit: Duration) -> Option<Output> {
     }
 }
 
+/// How a downloader run ended, when it wasn't cancelled.
+struct Finished {
+    success: bool,
+    stderr: String,
+}
+
+/// Runs a downloader until it finishes or the job is cancelled.
+///
+/// Waiting on `output()` meant Cancel was only noticed between the items of a
+/// post — for a single video, never — and the bar sat at "Downloading" until
+/// the whole file had arrived. Here stdout is read on a thread of its own, so
+/// this loop stays free to watch the flag even while yt-dlp is silent, as it
+/// is for the whole of a merge, and a cancel takes the process tree down with
+/// it, the merge's ffmpeg included.
+///
+/// Lines are decoded loosely. yt-dlp writes in the console's code page on
+/// Windows, and a reader that stopped at the first byte that isn't UTF-8 — a
+/// title with an accent in it — would leave the pipe undrained, and yt-dlp
+/// blocked writing into it for good.
+fn run_download(
+    cmd: &mut Command,
+    cancel: &AtomicBool,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Result<Finished, Cancelled>, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn_contained()
+        .map_err(|e| format!("Couldn't start the downloader: {e}"))?;
+
+    let stderr = child.stderr.take();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = stderr {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+
+    let (lines, incoming) = std::sync::mpsc::channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf).trim_end().to_string();
+                        if lines.send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(Err(Cancelled));
+        }
+        match incoming.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => on_line(&line),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("The downloader didn't exit cleanly: {e}"))?;
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(Err(Cancelled));
+    }
+    Ok(Ok(Finished {
+        success: status.success(),
+        stderr,
+    }))
+}
+
 /// Asks yt-dlp what's in a post without downloading any of it.
 fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
     // A Reddit post of nothing but images is answered from its page, which the
@@ -251,10 +341,20 @@ fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
         planned.push(Planned::Photo(url));
     }
 
+    let mut live = false;
     for (index, line) in text.lines().filter(|l| l.starts_with('{')).enumerate() {
         let Ok(entry) = serde_json::from_str::<Entry>(line) else {
             continue;
         };
+
+        // A stream still in progress has no end to download to, and yt-dlp
+        // will happily record one until it's stopped — which, with nothing on
+        // screen but "Downloading", nobody would think to do. The probe checks
+        // this too, but a probe that times out lets a link through unchecked.
+        if entry.is_live == Some(true) {
+            live = true;
+            continue;
+        }
 
         if !entry.formats.is_empty() {
             planned.push(Planned::Playable {
@@ -271,7 +371,9 @@ fn plan_from_yt_dlp(yt: &Path, url: &str) -> Plan {
     // Only consulted if nothing was found. A post can hit a rate limit on one
     // of its items and still hand over the rest, and that isn't worth a warning.
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    let trouble = if stderr.contains("429") || stderr.contains("too many requests") {
+    let trouble = if live {
+        Some("That's a live stream. Send it again once it has ended.".into())
+    } else if stderr.contains("429") || stderr.contains("too many requests") {
         Some("That site is asking us to slow down. Wait a minute and try again.".into())
     } else {
         None
@@ -626,8 +728,21 @@ pub fn fetch_post(
                 });
             }
             Planned::Playable { index, gif } => {
-                let (path, note) =
-                    fetch_playable(yt, quickjs, bins, url, work_dir, max_height, *index, done)?;
+                let fetched = fetch_playable(
+                    yt,
+                    quickjs,
+                    bins,
+                    url,
+                    work_dir,
+                    max_height,
+                    *index,
+                    done,
+                    cancel,
+                    &mut |fraction| on_progress((done as f64 + fraction) / total),
+                )?;
+                let Ok((path, note)) = fetched else {
+                    return Ok(Err(Cancelled));
+                };
                 if *gif {
                     let width = 480;
                     let path = to_gif(bins, &path, width)?;
@@ -659,7 +774,10 @@ pub fn fetch_post(
             return Err(reason);
         }
         if let Some(gallery) = gallery {
-            items = fetch_with_gallery(gallery, work_dir, url, cancel)?;
+            match fetch_with_gallery(gallery, work_dir, url, cancel)? {
+                Ok(found) => items = found,
+                Err(cancelled) => return Ok(Err(cancelled)),
+            }
         }
     }
 
@@ -682,7 +800,9 @@ fn fetch_playable(
     max_height: u32,
     index: usize,
     slot: usize,
-) -> Result<(PathBuf, Option<String>), String> {
+    cancel: &AtomicBool,
+    on_progress: &mut dyn FnMut(f64),
+) -> Result<Result<(PathBuf, Option<String>), Cancelled>, String> {
     let format = format!(
         "bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
         h = max_height
@@ -699,10 +819,13 @@ fn fetch_playable(
             .args
             .iter()
             .any(|arg| arg.contains("player_client=web_embedded"));
-        let output = crate::download::yt_dlp_command(yt)
+        let mut cmd = crate::download::yt_dlp_command(yt);
+        cmd
             // As in the plan: item N of `watch?v=X&list=Y` is otherwise the
             // list's Nth entry, not X.
             .arg("--no-playlist")
+            .arg("--newline")
+            .args(["--progress-template", crate::download::PROGRESS_TEMPLATE])
             .args(["--socket-timeout", "20", "--retries", "3"])
             .args(&runtime)
             .args(&attempt.args)
@@ -714,22 +837,35 @@ fn fetch_playable(
             .args(["-o", &template])
             .arg("--ffmpeg-location")
             .arg(&bins.ffmpeg)
-            .arg(url)
-            .stdin(Stdio::null())
-            .output_contained()
-            .map_err(|e| format!("Couldn't start the downloader: {e}"))?;
+            .arg(url);
 
-        if output.status.success() {
+        // Video and audio arrive as two downloads, each counting up from
+        // zero; the bar holds its high point rather than running backwards
+        // for the audio.
+        let mut shown = 0.0_f64;
+        let ran = run_download(&mut cmd, cancel, &mut |line| {
+            if let Some(fraction) = crate::download::parse_progress(line) {
+                if fraction > shown {
+                    shown = fraction;
+                    on_progress(fraction);
+                }
+            }
+        })?;
+        let Ok(output) = ran else {
+            return Ok(Err(Cancelled));
+        };
+
+        if output.success {
             let path = newest_file(work_dir, &format!("media-{slot}"))
                 .ok_or_else(|| "The download finished but produced no file.".to_string())?;
             let note = attempt.low_quality_fallback.then(|| {
                 "⚠ YouTube only made its 360p fallback available — this download may look soft."
                     .to_string()
             });
-            return Ok((path, note));
+            return Ok(Ok((path, note)));
         }
 
-        last = String::from_utf8_lossy(&output.stderr).into_owned();
+        last = output.stderr;
         // A non-embeddable video can reject this client even though the final
         // progressive fallback remains playable. That client-specific refusal
         // must not cut the ladder short.
@@ -749,25 +885,22 @@ fn fetch_with_gallery(
     gallery: &Path,
     work_dir: &Path,
     url: &str,
-    cancel: &Arc<AtomicBool>,
-) -> Result<Vec<MediaItem>, String> {
-    let output = base_command(gallery)
+    cancel: &AtomicBool,
+) -> Result<Result<Vec<MediaItem>, Cancelled>, String> {
+    let mut cmd = base_command(gallery);
+    cmd
         // For the same reason yt-dlp ignores its own: a user's settings could
         // rename, redirect or skip what lands in the work folder.
         .arg("--config-ignore")
         .args(["--dest", &work_dir.to_string_lossy()])
         .args(["--no-mtime", "--quiet"])
-        .arg(url)
-        .stdin(Stdio::null())
-        .output_contained()
-        .map_err(|e| format!("Couldn't start the image downloader: {e}"))?;
+        .arg(url);
+    let Ok(output) = run_download(&mut cmd, cancel, &mut |_| {})? else {
+        return Ok(Err(Cancelled));
+    };
 
-    if cancel.load(Ordering::Relaxed) {
-        return Ok(Vec::new());
-    }
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
+    if !output.success {
+        let err = output.stderr;
         let lower = err.to_lowercase();
 
         // gallery-dl can't read Reddit — it gets the web page where it expects
@@ -802,7 +935,7 @@ fn fetch_with_gallery(
     collect_files(work_dir, &mut found);
     found.sort();
 
-    Ok(found
+    Ok(Ok(found
         .into_iter()
         .map(|path| {
             let kind = kind_from_extension(&path);
@@ -812,7 +945,7 @@ fn fetch_with_gallery(
                 note: None,
             }
         })
-        .collect())
+        .collect()))
 }
 
 /// A line from a tool's output fit to show someone, or nothing.
@@ -877,9 +1010,71 @@ fn newest_file(dir: &Path, prefix: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn shell(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script]);
+        cmd
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_download_stops_when_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            flag.store(true, Ordering::Relaxed);
+        });
+
+        let started = Instant::now();
+        let mut progress = Vec::new();
+        let ran = run_download(
+            &mut shell("printf 'NITRATE|25|100|NA\\n'; sleep 30"),
+            &cancel,
+            &mut |line| progress.extend(crate::download::parse_progress(line)),
+        )
+        .expect("the stand-in downloader should start");
+
+        assert!(ran.is_err(), "should report the cancel");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(progress, vec![0.25]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_that_isnt_utf8_is_still_drained() {
+        // A Latin-1 title, then far more than a pipe holds: a reader that gave
+        // up at the first bad byte would leave this blocked on a full pipe.
+        let cancel = AtomicBool::new(false);
+        let mut lines = 0;
+        let ran = run_download(
+            &mut shell(
+                "printf 'Caf\\351\\n'; i=0; while [ $i -lt 5000 ]; do \
+                 echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; \
+                 i=$((i+1)); done; echo boom >&2; exit 3",
+            ),
+            &cancel,
+            &mut |_| lines += 1,
+        )
+        .expect("the stand-in downloader should start");
+
+        let Ok(finished) = ran else {
+            panic!("nothing cancelled it");
+        };
+        assert!(!finished.success);
+        assert_eq!(finished.stderr.trim(), "boom");
+        assert_eq!(lines, 5001);
+    }
+
     #[test]
     fn spots_a_twitter_gif_by_its_path() {
         let gif = Entry {
+            is_live: None,
             formats: vec![Format {
                 url: Some("https://video.twimg.com/tweet_video/abc.mp4".into()),
             }],
@@ -887,6 +1082,7 @@ mod tests {
             url: None,
         };
         let video = Entry {
+            is_live: None,
             formats: vec![Format {
                 url: Some("https://video.twimg.com/ext_tw_video/123/vid.mp4".into()),
             }],

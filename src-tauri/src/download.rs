@@ -516,8 +516,10 @@ struct DumpJson {
     duration: Option<f64>,
     extractor_key: Option<String>,
     webpage_url: Option<String>,
+    /// Sites report `null` here as often as `false`, and `default` covers a
+    /// missing key but not a null one.
     #[serde(default)]
-    is_live: bool,
+    is_live: Option<bool>,
 }
 
 /// Spaces out metadata requests so we don't rate-limit ourselves.
@@ -678,7 +680,7 @@ pub fn probe_url(bin: &Path, url: &str) -> Result<UrlInfo, String> {
     let parsed: DumpJson = serde_json::from_str(&stdout)
         .map_err(|_| "The downloader returned something unexpected for that link.".to_string())?;
 
-    if parsed.is_live {
+    if parsed.is_live == Some(true) {
         return Err("That's a live stream — it has no fixed length to compress.".into());
     }
 
@@ -785,10 +787,7 @@ pub fn fetch(
         .arg(&ffmpeg_path)
         // Machine-readable progress on stdout, rather than scraping the
         // human-facing progress bar.
-        .args([
-            "--progress-template",
-            "download:NITRATE|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
-        ])
+        .args(["--progress-template", PROGRESS_TEMPLATE])
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -844,8 +843,12 @@ pub fn fetch(
     find_downloaded(work_dir).map(Ok)
 }
 
+/// Machine-readable progress on stdout, rather than scraping the human-facing
+/// progress bar. Pair with `--newline` and read with `parse_progress`.
+pub(crate) const PROGRESS_TEMPLATE: &str = "download:NITRATE|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s";
+
 /// `download:NITRATE|<done>|<total>|<estimate>`
-fn parse_progress(line: &str) -> Option<f64> {
+pub(crate) fn parse_progress(line: &str) -> Option<f64> {
     let rest = line.trim().strip_prefix("NITRATE|")?;
     let mut parts = rest.split('|');
     let done: f64 = parts.next()?.trim().parse().ok()?;
