@@ -419,7 +419,9 @@ pub fn plan(
         _ => 48,
     };
     if audio_kbps > 0 && (total_kbps - audio_kbps as f64) < MIN_VIDEO_KBPS * 2.0 {
-        let squeezed = ((total_kbps * 0.25) as u32).clamp(audio_floor, audio_kbps);
+        // A copied track can already sit below the floor — a 32k voice memo —
+        // and `clamp` panics when its minimum passes its maximum.
+        let squeezed = ((total_kbps * 0.25) as u32).clamp(audio_floor.min(audio_kbps), audio_kbps);
         if squeezed < audio_kbps && settings.audio_codec != AudioCodec::Copy {
             notes.push(format!(
                 "Audio dropped to {squeezed} kbps to protect the video."
@@ -1463,10 +1465,39 @@ fn cleanup_passlog(passlog: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    // With the separator, or job 1's cleanup matches `-10-0.log` through
+    // `-19-0.log` too and deletes stats another job's second pass still needs.
+    let prefix = format!("{prefix}-");
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with(&prefix) {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passlog_cleanup_leaves_other_jobs_alone() {
+        let dir = std::env::temp_dir().join(format!("nitrate-passlog-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = ["job-1-0.log", "job-1-0.log.mbtree"];
+        let theirs = ["job-10-0.log", "job-12-0.log.mbtree", "job-100-0.log"];
+        for name in mine.iter().chain(&theirs) {
+            std::fs::write(dir.join(name), b"stats").unwrap();
+        }
+
+        cleanup_passlog(&dir.join("job-1"));
+
+        for name in mine {
+            assert!(!dir.join(name).exists(), "{name} should be gone");
+        }
+        for name in theirs {
+            assert!(dir.join(name).exists(), "{name} belongs to another job");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -135,6 +135,38 @@ struct ProbeStream {
     r_frame_rate: Option<String>,
     duration: Option<String>,
     bit_rate: Option<String>,
+    #[serde(default)]
+    side_data_list: Vec<ProbeSideData>,
+    #[serde(default)]
+    tags: ProbeTags,
+}
+
+#[derive(Deserialize)]
+struct ProbeSideData {
+    rotation: Option<f64>,
+}
+
+#[derive(Deserialize, Default)]
+struct ProbeTags {
+    rotate: Option<String>,
+}
+
+impl ProbeStream {
+    /// Whether the picture is displayed a quarter-turn from how it's stored.
+    ///
+    /// Phones record portrait video as landscape frames plus a rotation flag,
+    /// and ffmpeg applies that flag before any `-vf` runs. So the size that
+    /// matters for planning, cropping and scaling is the displayed one — the
+    /// stored one made a 90% crop too big for the frame and a scale the wrong
+    /// way round.
+    fn quarter_turned(&self) -> bool {
+        let degrees = self
+            .side_data_list
+            .iter()
+            .find_map(|side| side.rotation)
+            .or_else(|| self.tags.rotate.as_deref()?.trim().parse().ok());
+        degrees.is_some_and(|d: f64| (d.rem_euclid(180.0) - 90.0).abs() < 1.0)
+    }
 }
 
 #[derive(Deserialize)]
@@ -218,10 +250,17 @@ pub fn probe(bins: &Binaries, input: &Path) -> Result<MediaInfo, String> {
         .or_else(|| std::fs::metadata(input).ok().map(|m| m.len()))
         .unwrap_or(0);
 
+    let (width, height) = (video.width.unwrap_or(0), video.height.unwrap_or(0));
+    let (width, height) = if video.quarter_turned() {
+        (height, width)
+    } else {
+        (width, height)
+    };
+
     Ok(MediaInfo {
         duration,
-        width: video.width.unwrap_or(0),
-        height: video.height.unwrap_or(0),
+        width,
+        height,
         fps,
         video_codec: video.codec_name.clone().unwrap_or_else(|| "unknown".into()),
         audio_codec: audio.and_then(|a| a.codec_name.clone()),

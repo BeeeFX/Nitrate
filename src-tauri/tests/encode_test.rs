@@ -278,6 +278,94 @@ fn trimming_buys_quality_at_the_same_target() {
     );
 }
 
+/// A phone's portrait clip: landscape frames stored with a quarter-turn flag.
+fn make_rotated_clip(dir: &Path) -> PathBuf {
+    let bins = ffmpeg::resolve();
+    let plain = make_clip(dir, "plain.mp4", "1280x720", 30, 6, 4000);
+    let out = dir.join("portrait.mp4");
+
+    let status = Command::new(&bins.ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-display_rotation", "90", "-i"])
+        .arg(&plain)
+        .args(["-c", "copy"])
+        .arg(&out)
+        .status()
+        .expect("ffmpeg should be available");
+    assert!(status.success(), "failed to build the rotated clip");
+    out
+}
+
+#[test]
+fn a_rotated_clip_is_measured_the_way_up_it_plays() {
+    let dir = temp_dir("rotated");
+    let input = make_rotated_clip(&dir);
+
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    assert_eq!((info.width, info.height), (720, 1280));
+
+    // Most of the width: worked out on the stored 1280x720 this asked for a
+    // crop wider than the upright frame ffmpeg actually filters, and failed.
+    let edits = Edits {
+        crop: Some(CropRect {
+            x: 0.05,
+            y: 0.0,
+            width: 0.9,
+            height: 1.0,
+        }),
+        ..Edits::default()
+    };
+    let set = settings(10_000_000, &dir);
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &edits,
+        name_hint: None,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let outcome = encode::run_job(&bins, &task, &cancel, |_, _| {})
+        .expect("a crop inside the frame should encode")
+        .unwrap_or_else(|_| panic!("encode should not be cancelled"));
+
+    let out = ffmpeg::probe(&bins, &outcome.output).expect("output should be readable");
+    assert!(
+        out.height > out.width,
+        "portrait in, portrait out — got {}x{}",
+        out.width,
+        out.height
+    );
+    assert_eq!(
+        (out.width, out.height),
+        (outcome.plan.width, outcome.plan.height),
+        "the plan should describe the file it produced"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn copied_audio_below_the_floor_still_plans() {
+    let dir = temp_dir("quiet-audio");
+    let input = make_clip(&dir, "input.mp4", "640x360", 30, 2, 1000);
+
+    let bins = ffmpeg::resolve();
+    let mut info = ffmpeg::probe(&bins, &input).expect("probe should succeed");
+    // A long voice memo: little audio, and too long for the target to be
+    // generous. The squeeze used to clamp between a 48k floor and this 32k
+    // ceiling, which panics — and the release build aborts on a panic.
+    info.audio_bitrate_kbps = Some(32);
+    info.duration = 12.0 * 60.0;
+
+    let mut set = settings(10_000_000, &dir);
+    set.audio_codec = AudioCodec::Copy;
+    let result = encode::plan(&info, &set, &Edits::default(), &bins);
+    assert!(result.is_ok(), "expected a plan, got {result:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn cropping_changes_the_output_shape() {
     // A centred square out of a 1280x720 source: the full height, and 720/1280
