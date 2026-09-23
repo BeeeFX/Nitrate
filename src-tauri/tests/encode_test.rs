@@ -9,7 +9,7 @@ use nitrate_lib::encode::{
 use nitrate_lib::ffmpeg;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Builds a throwaway clip so the suite doesn't depend on any fixture file.
@@ -1111,4 +1111,117 @@ fn every_codec_the_app_offers_gets_a_playable_preview() {
     }
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Everything in `dir` that the encoder wrote, as opposed to the input.
+fn outputs_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("nitrate"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn two_jobs_with_the_same_name_both_survive() {
+    // Two `clip.mp4`s from different folders, encoding at once into the same
+    // output folder: both used to pick `clip-nitrate.mp4`, and one silently
+    // overwrote the other.
+    let root = temp_dir("same-name");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let inputs: Vec<PathBuf> = ["a", "b"]
+        .iter()
+        .map(|folder| {
+            let dir = root.join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            make_clip(&dir, "clip.mp4", "640x360", 30, 3, 3000)
+        })
+        .collect();
+
+    let handles: Vec<_> = inputs
+        .into_iter()
+        .map(|input| {
+            let out = out.clone();
+            std::thread::spawn(move || {
+                let bins = ffmpeg::resolve();
+                let info = ffmpeg::probe(&bins, &input).unwrap();
+                let set = settings(400_000, &out);
+                let task = encode::Task {
+                    input: &input,
+                    info: &info,
+                    settings: &set,
+                    edits: &Edits::default(),
+                    name_hint: None,
+                };
+                let cancel = Arc::new(AtomicBool::new(false));
+                encode::run_job(&bins, &task, &cancel, |_, _| {})
+                    .expect("encode should not error")
+                    .unwrap_or_else(|_| panic!("not cancelled"))
+                    .output
+            })
+        })
+        .collect();
+    let mut produced: Vec<PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    produced.sort();
+
+    assert_ne!(produced[0], produced[1], "both jobs claimed the same file");
+    assert_eq!(
+        outputs_in(&out),
+        vec!["clip-nitrate-2.mp4", "clip-nitrate.mp4"],
+        "exactly the two finished files, nothing partial"
+    );
+    for path in &produced {
+        let info = ffmpeg::probe(&ffmpeg::resolve(), path).expect("each should be a whole video");
+        assert!(info.duration > 2.0);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_cancelled_encode_leaves_nothing_behind() {
+    let dir = temp_dir("cancelled");
+    let input = make_clip(&dir, "input.mp4", "1280x720", 30, 20, 6000);
+    let bins = ffmpeg::resolve();
+    let info = ffmpeg::probe(&bins, &input).unwrap();
+    let mut set = settings(5_000_000, &dir);
+    set.preset = "slow".into();
+    let task = encode::Task {
+        input: &input,
+        info: &info,
+        settings: &set,
+        edits: &Edits::default(),
+        name_hint: None,
+    };
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancel);
+    let mut seen_partial = false;
+    let result = encode::run_job(&bins, &task, &cancel, |progress, stage| {
+        // Well into the second pass, so a partial file exists by now.
+        if stage == "Encoding" && progress > 0.5 {
+            seen_partial |= outputs_in(&dir).iter().any(|n| n.contains(".partial."));
+            flag.store(true, Ordering::Relaxed);
+        }
+    })
+    .expect("encode should not error");
+
+    assert!(result.is_err(), "should report the cancel");
+    assert!(
+        seen_partial,
+        "the encode should have been writing a partial file"
+    );
+    assert_eq!(outputs_in(&dir), Vec::<String>::new(), "left behind");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reserved_windows_names_get_a_suffix() {
+    assert_eq!(encode::safe_stem("CON"), "CON_");
+    assert_eq!(encode::safe_stem("nul"), "nul_");
+    assert_eq!(encode::safe_stem("Console"), "Console");
+    assert_eq!(encode::safe_stem("COM1"), "COM1_");
 }

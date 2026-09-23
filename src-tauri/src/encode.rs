@@ -1104,7 +1104,12 @@ pub fn run_job(
     } = task;
 
     let mut plan = plan(info, settings, edits, bins)?;
-    let output = output_path(input, settings, *name_hint)?;
+    // Everything below writes to `dest.partial`. Any way out of here other than
+    // the `commit` at the end — an error, a cancel, a miss on the target —
+    // drops `dest`, which takes both the partial file and the claimed name
+    // back out of the user's folder.
+    let dest = output_destination(input, settings, *name_hint)?;
+    let output = dest.partial.clone();
 
     // Progress is measured against what actually gets written, which after a
     // trim is shorter than the source.
@@ -1232,6 +1237,7 @@ pub fn run_job(
         ));
     }
 
+    let output = dest.commit()?;
     Ok(Ok(EncodeOutcome {
         output,
         final_bytes,
@@ -1342,10 +1348,23 @@ pub fn safe_stem(raw: &str) -> String {
     let result = clipped.trim().to_string();
 
     if result.is_empty() {
-        "video".into()
-    } else {
-        result
+        return "video".into();
     }
+
+    // Windows reserves these as device names whatever follows the dot, so a
+    // video titled "CON" can't become `CON.mp4` — creating it fails, or worse,
+    // opens the console.
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED
+        .iter()
+        .any(|name| result.eq_ignore_ascii_case(name))
+    {
+        return format!("{result}_");
+    }
+    result
 }
 
 /// Where finished files land.
@@ -1380,33 +1399,28 @@ pub fn place_untouched(
             .unwrap_or_else(|| "video".into()),
     };
 
-    let mut candidate = dir.join(format!("{stem}.{ext}"));
-    let mut n = 2;
-    while candidate.exists() {
-        candidate = dir.join(format!("{stem}-{n}.{ext}"));
-        n += 1;
-        if n > 999 {
-            return Err("Too many files with that name already.".into());
-        }
-    }
+    let dest = Destination::claim(&dir, &stem, &ext)?;
 
-    // Rename first — it's instant when both sides are on the same volume, which
-    // they usually aren't for a temp download, hence the copy fallback.
-    if std::fs::rename(source, &candidate).is_err() {
-        std::fs::copy(source, &candidate)
-            .map_err(|e| format!("Couldn't move the file into place: {e}"))?;
-        let _ = std::fs::remove_file(source);
+    // Rename first — it's instant when both sides are on the same volume, and
+    // replaces the placeholder in one step. A temp download usually isn't on
+    // the same volume, so the copy goes to the partial name first: a copy
+    // interrupted halfway must not leave a file that looks finished.
+    if std::fs::rename(source, &dest.path).is_ok() {
+        return Ok(dest.keep());
     }
-
-    Ok(candidate)
+    std::fs::copy(source, &dest.partial)
+        .map_err(|e| format!("Couldn't move the file into place: {e}"))?;
+    let placed = dest.commit()?;
+    let _ = std::fs::remove_file(source);
+    Ok(placed)
 }
 
 /// Picks a destination that won't clobber anything the user already has.
-fn output_path(
+fn output_destination(
     input: &Path,
     settings: &Settings,
     name_hint: Option<&str>,
-) -> Result<PathBuf, String> {
+) -> Result<Destination, String> {
     let dir = output_dir(settings)?;
 
     let stem = match name_hint {
@@ -1426,16 +1440,81 @@ fn output_path(
         .or_else(|| is_gif(input).then_some("gif"))
         .unwrap_or_else(|| settings.container.extension());
 
-    let mut candidate = dir.join(format!("{stem}-nitrate.{ext}"));
-    let mut n = 2;
-    while candidate.exists() {
-        candidate = dir.join(format!("{stem}-nitrate-{n}.{ext}"));
-        n += 1;
-        if n > 999 {
-            return Err("Too many files with that name already.".into());
+    Destination::claim(&dir, &format!("{stem}-nitrate"), ext)
+}
+
+/// A name claimed in the output folder, and the file written before it.
+///
+/// Checking that a name was free and then letting ffmpeg create it much later
+/// — pass 2 doesn't start writing until pass 1 is done — left room for another
+/// job to pick the same name in between: two `clip.mp4`s from different
+/// folders, or two links with the same title, both became `clip-nitrate.mp4`
+/// and one overwrote the other. The name is now claimed by creating it, which
+/// only one caller can do.
+///
+/// The work goes into a `.partial` file beside it and is renamed over the
+/// placeholder once it's whole. A cancel or a failure used to leave the
+/// half-written file behind under the finished name — an MP4 with no index,
+/// which won't play, sitting in Downloads looking done. Dropped without
+/// `commit`, this removes both.
+struct Destination {
+    path: PathBuf,
+    partial: PathBuf,
+    done: bool,
+}
+
+impl Destination {
+    fn claim(dir: &Path, stem: &str, ext: &str) -> Result<Destination, String> {
+        for n in 1..1000 {
+            let name = if n == 1 {
+                stem.to_string()
+            } else {
+                format!("{stem}-{n}")
+            };
+            let path = dir.join(format!("{name}.{ext}"));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => {
+                    // Still ending in the real extension, which is how ffmpeg
+                    // picks the container to write.
+                    let partial = dir.join(format!("{name}.partial.{ext}"));
+                    return Ok(Destination {
+                        path,
+                        partial,
+                        done: false,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("Couldn't write to {}: {e}", dir.display())),
+            }
+        }
+        Err("Too many files with that name already.".into())
+    }
+
+    /// Moves the finished partial file into the claimed name.
+    fn commit(self) -> Result<PathBuf, String> {
+        std::fs::rename(&self.partial, &self.path)
+            .map_err(|e| format!("Couldn't put the finished file in place: {e}"))?;
+        Ok(self.keep())
+    }
+
+    /// The claimed name now holds the real file, however it got there.
+    fn keep(mut self) -> PathBuf {
+        self.done = true;
+        std::mem::take(&mut self.path)
+    }
+}
+
+impl Drop for Destination {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = std::fs::remove_file(&self.partial);
+            let _ = std::fs::remove_file(&self.path);
         }
     }
-    Ok(candidate)
 }
 
 fn dirs_downloads() -> Option<PathBuf> {
